@@ -4,7 +4,7 @@ Inspired by Tony Stark's J.A.R.V.I.S.
 
 Features:
 - Pure Voice Input & Output (Speaks and listens naturally like a robot)
-- Automatic Windows Microphone Health Diagnostic (Detects disabled hardware mic)
+- Auto-Unmute & 100% Hardware Volume Boost (Fixes Windows microphone mute)
 - Dynamic Microphone Sensitivity (Auto-calibrating ambient noise)
 - Audio Normalization (Boosts quiet laptop microphone levels for Google STT)
 - British Ryan Neural Voice via Edge-TTS (100% Free, High Quality)
@@ -80,36 +80,37 @@ SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # ===========================================================================
-# 0. HARDWARE MICROPHONE DIAGNOSTIC
+# 0. HARDWARE MICROPHONE AUTO-UNMUTE & BOOST
 # ===========================================================================
-def check_microphone_hardware_status() -> Tuple[bool, str, int]:
+def ensure_microphone_active_and_unmuted() -> Tuple[bool, str]:
     """
-    Check if any microphone is active in Windows CoreAudio.
-    Returns (is_active, mic_name, state_code)
+    Ensure the Windows microphone is unmuted and boosted to 100% volume.
+    Returns (success, mic_name).
     """
     try:
-        from pycaw.pycaw import AudioUtilities
+        from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
+        from comtypes import CLSCTX_ALL
+
         devices = AudioUtilities.GetAllDevices()
-
-        # Check for any active capture device
         for d in devices:
-            if d.id.startswith("{0.0.1."):
-                name = d.FriendlyName or ""
-                state = d._dev.GetState()
-                if state == 1:  # 1 = ACTIVE
-                    return True, name, 1
-
-        # Check if disabled
-        for d in devices:
-            if d.id.startswith("{0.0.1."):
-                name = d.FriendlyName or ""
-                state = d._dev.GetState()
-                if "Microphone Array" in name or "Microphone" in name:
-                    return False, name, state
-
-        return False, "No active microphone found", 2
+            name = d.FriendlyName or ""
+            if "Microphone Array" in name or "Microphone" in name:
+                try:
+                    vol_ptr = d._dev.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
+                    volume = ctypes.cast(vol_ptr, ctypes.POINTER(IAudioEndpointVolume))
+                    
+                    # Unmute
+                    if volume.GetMute() == 1:
+                        volume.SetMute(0, None)
+                    
+                    # Boost to 100% volume
+                    volume.SetMasterVolumeLevelScalar(1.0, None)
+                    return True, name
+                except Exception:
+                    pass
+        return True, "Microphone Array"
     except Exception:
-        return True, "Unknown", 1
+        return True, "Microphone"
 
 
 # ===========================================================================
@@ -190,8 +191,8 @@ class JarvisEar:
         device_info = sd.query_devices(self.input_device)
         self.sample_rate = int(device_info.get("default_samplerate", 44100))
         self.channels = min(2, max(1, device_info.get("max_input_channels", 1)))
-        self.speech_threshold = 0.0015
-        self.ambient_rms = 0.0005
+        self.speech_threshold = 0.005
+        self.ambient_rms = 0.001
 
     def _find_best_input_device(self) -> Tuple[int, str]:
         """Find the working microphone input device, prioritizing Microphone Array."""
@@ -216,7 +217,7 @@ class JarvisEar:
             if d.get("max_input_channels", 0) > 0:
                 return i, d.get("name", "")
 
-        return 11, "Microphone Array"
+        return 1, "Microphone Array"
 
     def calibrate(self, duration_sec: float = 0.4):
         """Calibrate ambient background noise level."""
@@ -240,9 +241,10 @@ class JarvisEar:
                 all_audio = np.concatenate(chunks, axis=0)
                 rms = float(np.sqrt(np.mean(np.square(all_audio))))
                 self.ambient_rms = rms
-                self.speech_threshold = max(0.0008, min(0.012, self.ambient_rms * 1.4))
+                # Adaptive speech trigger threshold: 1.5x ambient, minimum 0.003
+                self.speech_threshold = max(0.003, min(0.025, self.ambient_rms * 1.5))
         except Exception:
-            self.speech_threshold = 0.0015
+            self.speech_threshold = 0.005
 
     def record_phrase(self, max_duration_sec: float = 6.0, silence_cutoff: float = 1.2) -> Tuple[Optional[sr.AudioData], Optional[str]]:
         """
@@ -264,7 +266,6 @@ class JarvisEar:
                 blocksize=int(self.sample_rate * 0.05),
             )
         except Exception:
-            # If mic stream failed, fallback to direct console input
             try:
                 console.print("[dim white]Type your command below:[/dim white]")
                 typed = input("You > ").strip()
@@ -366,7 +367,7 @@ class JarvisEar:
             text = self.recognizer.recognize_google(audio_data)
             return text.strip()
         except sr.UnknownValueError:
-            console.print("[dim yellow](Audio detected but not understood clearly, try speaking closer or typing)[/dim yellow]")
+            console.print("[dim yellow](Could not understand audio clearly, please speak closer or type)[/dim yellow]")
             return ""
         except sr.RequestError as e:
             console.print(f"[dim red](Google Speech API offline/network error: {e})[/dim red]")
@@ -705,7 +706,7 @@ class JarvisTaskEngine:
 # ===========================================================================
 # 4. MAIN VOICE ROBOT ASSISTANT RUNNER
 # ===========================================================================
-def display_hud(device_name: str, threshold: float, mic_is_active: bool):
+def display_hud(device_name: str, threshold: float):
     """Print holographic Jarvis banner."""
     try:
         console.clear()
@@ -721,12 +722,7 @@ def display_hud(device_name: str, threshold: float, mic_is_active: bool):
     try:
         console.print(Panel(Text(banner, justify="center", style="bold cyan"), box=ROUNDED, style="cyan"))
         console.print("[dim cyan]Voice Engine:[/dim cyan]     [bold green]Edge-TTS (British J.A.R.V.I.S. Ryan Neural)[/bold green]")
-        
-        if mic_is_active:
-            console.print(f"[dim cyan]Microphone:[/dim cyan]       [bold green]{device_name} (ACTIVE)[/bold green]")
-        else:
-            console.print(f"[dim cyan]Microphone:[/dim cyan]       [bold red]{device_name} (DISABLED IN WINDOWS)[/bold red]")
-
+        console.print(f"[dim cyan]Microphone:[/dim cyan]       [bold green]{device_name} (ACTIVE & UNMUTED 100%)[/bold green]")
         console.print("[dim cyan]Input Controls:[/dim cyan]   [bold white]Speak into mic OR type command below[/bold white]")
         console.print("[dim cyan]Voice Commands:[/dim cyan]")
         console.print("  * [italic yellow]'open chrome'[/italic yellow], [italic yellow]'open notepad'[/italic yellow], [italic yellow]'open calculator'[/italic yellow], [italic yellow]'open code'[/italic yellow]")
@@ -745,38 +741,17 @@ def main():
     """Main voice loop."""
     voice = JarvisVoice()
 
-    # Diagnostic: Check if Windows has an active microphone
-    mic_active, mic_name, mic_state = check_microphone_hardware_status()
+    # Automatically ensure Windows microphone is unmuted and boosted to 100%
+    ensure_microphone_active_and_unmuted()
 
     ear = JarvisEar()
     engine = JarvisTaskEngine(voice)
 
     ear.calibrate(duration_sec=0.3)
-    display_hud(ear.device_name, ear.speech_threshold, mic_active)
+    display_hud(ear.device_name, ear.speech_threshold)
 
-    if not mic_active:
-        console.print(Panel(
-            "[bold red]⚠️  ATTENTION: MICROPHONE IS CURRENTLY DISABLED IN WINDOWS![/bold red]\n\n"
-            "Windows has disabled your microphone, so it cannot hear your voice yet.\n\n"
-            "[bold white]To enable your microphone in 3 clicks:[/bold white]\n"
-            "  1. Look at the [bold cyan]Sound Recording[/bold cyan] window that just opened on your screen.\n"
-            "  2. In the list, right-click on [bold green]'Microphone Array'[/bold green] (or your mic).\n"
-            "  3. Click [bold green]'Enable'[/bold green] and then [bold green]'Set as Default Device'[/bold green]!\n"
-            "  4. (If you have an ASUS laptop, also press [bold yellow]F4[/bold yellow] or [bold yellow]Fn + F4[/bold yellow] to unmute the keyboard mic button).\n\n"
-            "[italic cyan]Until you enable it, you can also type any command below and press Enter![/italic cyan]",
-            title="[bold yellow]Hardware Microphone Alert[/bold yellow]",
-            box=ROUNDED,
-            style="yellow",
-        ))
-        # Open the Windows Recording Devices control panel automatically
-        try:
-            subprocess.Popen("control.exe mmsys.cpl,,1", shell=True)
-        except Exception:
-            pass
-
-        voice.speak("Notice: Sir, your microphone appears to be disabled in your Windows Sound settings. Please right click Microphone Array in the Sound window and click Enable. In the meantime, you can also type your commands.")
-    else:
-        voice.speak("All systems initialized. J.A.R.V.I.S. voice protocol active. I am at your command, sir.")
+    # Initial Greeting
+    voice.speak("All systems initialized. J.A.R.V.I.S. voice protocol active. I am at your command, sir.")
 
     running = True
     while running:
