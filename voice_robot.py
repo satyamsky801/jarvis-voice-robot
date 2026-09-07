@@ -100,11 +100,23 @@ def safe_print(message: str, style: str = ""):
 # 0. SINGLE-INSTANCE PROCESS ENFORCEMENT & MICROPHONE AUTO-UNMUTE
 # ===========================================================================
 def enforce_single_instance():
-    """Ensure only one instance of JARVIS runs at a time, killing any stale/duplicate instances."""
+    """Ensure only one instance of JARVIS runs at a time, protecting launcher parent."""
     current_pid = os.getpid()
+    parent_pid = os.getppid()
+    protected_pids = {current_pid, parent_pid}
+    try:
+        cur_proc = psutil.Process(current_pid)
+        for parent in cur_proc.parents():
+            protected_pids.add(parent.pid)
+    except Exception:
+        pass
+
     for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
         try:
-            if proc.info['pid'] != current_pid and proc.info['name'] and 'python' in proc.info['name'].lower():
+            pid = proc.info['pid']
+            if pid in protected_pids:
+                continue
+            if proc.info['name'] and 'python' in proc.info['name'].lower():
                 cmdline = " ".join(proc.info.get('cmdline') or []).lower()
                 if 'voice_robot.py' in cmdline:
                     try:
