@@ -64,7 +64,6 @@ from rich.panel import Panel
 from rich.text import Text
 
 from llm_engine import JarvisLLMEngine
-from desktop_character import JarvisDesktopMascot
 
 # Initialize Rich Console with safe fallback
 try:
@@ -1800,24 +1799,20 @@ def display_hud(device_name: str, threshold: float, llm_info: str = "Ollama (lla
 
 
 def run_voice_loop(ear: JarvisEar, engine: JarvisTaskEngine, voice: JarvisVoice, mascot=None):
-    """Background loop for voice recognition & command execution."""
+    """Continuous loop for voice recognition & command execution."""
     while True:
         try:
             safe_print("● [LISTENING...] (Speak or type your command)", "bold green")
-            recognized_text = ear.listen(timeout_sec=5.0)
+            recognized_text = ear.listen(timeout_sec=6.0)
 
             if recognized_text:
                 safe_print(f"[YOU]: {recognized_text}", "bold yellow")
                 keep_running = engine.execute_command(recognized_text)
                 if not keep_running:
-                    if mascot:
-                        mascot.close()
                     break
 
         except KeyboardInterrupt:
             voice.speak("Catch you later. Shutting down.")
-            if mascot:
-                mascot.close()
             break
         except Exception as e:
             safe_print(f"(System notice: {e})", "dim red")
@@ -1825,73 +1820,26 @@ def run_voice_loop(ear: JarvisEar, engine: JarvisTaskEngine, voice: JarvisVoice,
 
 
 def main():
-    """Launch JARVIS with interactive desktop mascot character and voice intelligence."""
+    """Launch JARVIS Autonomous Voice Assistant."""
     enforce_single_instance()
 
-    cli_mode = "--cli" in sys.argv or "--no-gui" in sys.argv
-
-    # 1. Initialize Desktop Mascot UI on main thread if not in CLI mode
-    mascot = None
-    if not cli_mode:
-        try:
-            mascot = JarvisDesktopMascot()
-        except Exception as e:
-            logger.warning("Could not launch Desktop Mascot GUI, falling back to CLI mode: %s", e)
-            mascot = None
-
-    # 2. Initialize Voice, Ear, and TaskEngine with mascot hooks
-    voice = JarvisVoice(mascot=mascot)
+    # 1. Initialize Voice, Ear, and TaskEngine
+    voice = JarvisVoice()
     ensure_microphone_active_and_unmuted()
 
-    ear = JarvisEar(voice=voice, mascot=mascot)
-    engine = JarvisTaskEngine(voice=voice, mascot=mascot)
-
-    # Wire up mascot click & typed command callbacks
-    if mascot:
-        def on_typed(text: str):
-            engine.execute_command(text)
-
-        def on_listen():
-            if mascot:
-                mascot.show_speech("Listening...", title="MIC ACTIVE", duration=5.0)
-                mascot.set_state("listen")
-
-        def on_mute():
-            voice.is_muted = not getattr(voice, "is_muted", False)
-            return voice.is_muted
-
-        mascot.on_typed_command = on_typed
-        mascot.on_trigger_listen = on_listen
-        mascot.on_toggle_mute = on_mute
+    ear = JarvisEar(voice=voice)
+    engine = JarvisTaskEngine(voice=voice)
 
     ear.calibrate(duration_sec=0.5)
     llm_info = f"{engine.llm_engine.provider.capitalize()} ({engine.llm_engine.model})" if engine.llm_engine else "Local Fast Path"
     display_hud(ear.device_name, ear.speech_threshold, llm_info)
 
-    # 3. Start background voice thread
-    voice_thread = threading.Thread(
-        target=run_voice_loop,
-        args=(ear, engine, voice, mascot),
-        daemon=True
-    )
-    voice_thread.start()
-
     voice.speak("Hey, I'm online and listening. What do you need?")
 
-    # 4. If GUI mode, run Tkinter event loop on main thread; else wait for voice thread
-    if mascot:
-        try:
-            mascot.run()
-        except KeyboardInterrupt:
-            pass
-        finally:
-            mascot.close()
-    else:
-        try:
-            while voice_thread.is_alive():
-                time.sleep(0.5)
-        except KeyboardInterrupt:
-            voice.speak("Catch you later. Shutting down.")
+    try:
+        run_voice_loop(ear, engine, voice)
+    except KeyboardInterrupt:
+        voice.speak("Catch you later. Shutting down.")
 
 
 if __name__ == "__main__":
