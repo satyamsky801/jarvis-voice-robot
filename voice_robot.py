@@ -4,6 +4,7 @@ Inspired by Tony Stark's J.A.R.V.I.S.
 
 Features:
 - Pure Voice Input & Output (Speaks and listens naturally like a robot)
+- Automatic Windows Microphone Health Diagnostic (Detects disabled hardware mic)
 - Dynamic Microphone Sensitivity (Auto-calibrating ambient noise)
 - Audio Normalization (Boosts quiet laptop microphone levels for Google STT)
 - British Ryan Neural Voice via Edge-TTS (100% Free, High Quality)
@@ -76,6 +77,39 @@ WAKE_WORDS = ["jarvis", "hey jarvis", "robot", "hello jarvis"]
 NOTES_FILE = Path("jarvis_notes.txt")
 SCREENSHOTS_DIR = Path(os.path.expanduser("~/Pictures/Jarvis_Screenshots"))
 SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+# ===========================================================================
+# 0. HARDWARE MICROPHONE DIAGNOSTIC
+# ===========================================================================
+def check_microphone_hardware_status() -> Tuple[bool, str, int]:
+    """
+    Check if any microphone is active in Windows CoreAudio.
+    Returns (is_active, mic_name, state_code)
+    """
+    try:
+        from pycaw.pycaw import AudioUtilities
+        devices = AudioUtilities.GetAllDevices()
+
+        # Check for any active capture device
+        for d in devices:
+            if d.id.startswith("{0.0.1."):
+                name = d.FriendlyName or ""
+                state = d._dev.GetState()
+                if state == 1:  # 1 = ACTIVE
+                    return True, name, 1
+
+        # Check if disabled
+        for d in devices:
+            if d.id.startswith("{0.0.1."):
+                name = d.FriendlyName or ""
+                state = d._dev.GetState()
+                if "Microphone Array" in name or "Microphone" in name:
+                    return False, name, state
+
+        return False, "No active microphone found", 2
+    except Exception:
+        return True, "Unknown", 1
 
 
 # ===========================================================================
@@ -156,14 +190,14 @@ class JarvisEar:
         device_info = sd.query_devices(self.input_device)
         self.sample_rate = int(device_info.get("default_samplerate", 44100))
         self.channels = min(2, max(1, device_info.get("max_input_channels", 1)))
-        self.speech_threshold = 0.0015  # Default sensitive threshold
+        self.speech_threshold = 0.0015
         self.ambient_rms = 0.0005
 
     def _find_best_input_device(self) -> Tuple[int, str]:
         """Find the working microphone input device, prioritizing Microphone Array."""
         devices = sd.query_devices()
 
-        # 1. First priority: Microphone Array (built-in laptop mic array)
+        # 1. First priority: Microphone Array
         for i, d in enumerate(devices):
             if d.get("max_input_channels", 0) > 0:
                 name = d.get("name", "").lower()
@@ -185,7 +219,7 @@ class JarvisEar:
         return 11, "Microphone Array"
 
     def calibrate(self, duration_sec: float = 0.4):
-        """Calibrate ambient background noise level to set dynamic sensitivity threshold."""
+        """Calibrate ambient background noise level."""
         audio_q = queue.Queue()
 
         def callback(indata, frames, time_info, status):
@@ -206,15 +240,13 @@ class JarvisEar:
                 all_audio = np.concatenate(chunks, axis=0)
                 rms = float(np.sqrt(np.mean(np.square(all_audio))))
                 self.ambient_rms = rms
-                # Sensitive threshold: 1.4x ambient, with safe bounds
                 self.speech_threshold = max(0.0008, min(0.012, self.ambient_rms * 1.4))
         except Exception:
             self.speech_threshold = 0.0015
 
     def record_phrase(self, max_duration_sec: float = 6.0, silence_cutoff: float = 1.2) -> Tuple[Optional[sr.AudioData], Optional[str]]:
         """
-        Record speech using non-blocking asynchronous audio callback queue.
-        Also checks for keyboard typing simultaneously.
+        Record speech or capture keyboard input.
         Returns (AudioData, typed_text).
         """
         audio_q = queue.Queue()
@@ -229,11 +261,16 @@ class JarvisEar:
                 samplerate=self.sample_rate,
                 dtype="float32",
                 callback=callback,
-                blocksize=int(self.sample_rate * 0.05),  # 50ms chunks
+                blocksize=int(self.sample_rate * 0.05),
             )
-        except Exception as e:
-            console.print(f"[dim red](Audio device notice: {e})[/dim red]")
-            return None, None
+        except Exception:
+            # If mic stream failed, fallback to direct console input
+            try:
+                console.print("[dim white]Type your command below:[/dim white]")
+                typed = input("You > ").strip()
+                return None, typed if typed else None
+            except Exception:
+                return None, None
 
         recorded_chunks = []
         speech_started = False
@@ -243,7 +280,7 @@ class JarvisEar:
 
         with stream:
             while (time.time() - start_time) < max_duration_sec:
-                # Check if user is typing on keyboard
+                # Check for keyboard typing
                 if msvcrt.kbhit():
                     ch = msvcrt.getwche()
                     if ch in ('\r', '\n'):
@@ -276,16 +313,13 @@ class JarvisEar:
                     silence_time += chunk_dur
                     recorded_chunks.append(chunk)
                     if silence_time >= silence_cutoff:
-                        # User stopped speaking
                         break
                 else:
-                    # Pre-speech rolling buffer (keep 0.3s)
                     recorded_chunks.append(chunk)
                     max_pre = int(0.3 / max(0.01, chunk_dur))
                     if len(recorded_chunks) > max_pre:
                         recorded_chunks.pop(0)
 
-        # If user typed something and pressed enter afterwards
         if typed_chars:
             typed = "".join(typed_chars).strip()
             if typed:
@@ -307,7 +341,7 @@ class JarvisEar:
         target_samples = int(len(full_audio) * 16000 / self.sample_rate)
         resampled = scipy.signal.resample(full_audio, target_samples)
 
-        # Boost & Normalize audio peak to 0.8 for loud, clear recognition
+        # Boost & Normalize audio peak to 0.8
         peak = float(np.max(np.abs(resampled)))
         if peak > 0.0001:
             resampled = resampled * (0.8 / peak)
@@ -671,7 +705,7 @@ class JarvisTaskEngine:
 # ===========================================================================
 # 4. MAIN VOICE ROBOT ASSISTANT RUNNER
 # ===========================================================================
-def display_hud(device_name: str, threshold: float):
+def display_hud(device_name: str, threshold: float, mic_is_active: bool):
     """Print holographic Jarvis banner."""
     try:
         console.clear()
@@ -687,8 +721,13 @@ def display_hud(device_name: str, threshold: float):
     try:
         console.print(Panel(Text(banner, justify="center", style="bold cyan"), box=ROUNDED, style="cyan"))
         console.print("[dim cyan]Voice Engine:[/dim cyan]     [bold green]Edge-TTS (British J.A.R.V.I.S. Ryan Neural)[/bold green]")
-        console.print(f"[dim cyan]Microphone:[/dim cyan]       [bold green]{device_name}[/bold green] (Sensitivity: {threshold:.5f})")
-        console.print("[dim cyan]Input Controls:[/dim cyan]   [bold white]Speak into mic OR type command anytime[/bold white]")
+        
+        if mic_is_active:
+            console.print(f"[dim cyan]Microphone:[/dim cyan]       [bold green]{device_name} (ACTIVE)[/bold green]")
+        else:
+            console.print(f"[dim cyan]Microphone:[/dim cyan]       [bold red]{device_name} (DISABLED IN WINDOWS)[/bold red]")
+
+        console.print("[dim cyan]Input Controls:[/dim cyan]   [bold white]Speak into mic OR type command below[/bold white]")
         console.print("[dim cyan]Voice Commands:[/dim cyan]")
         console.print("  * [italic yellow]'open chrome'[/italic yellow], [italic yellow]'open notepad'[/italic yellow], [italic yellow]'open calculator'[/italic yellow], [italic yellow]'open code'[/italic yellow]")
         console.print("  * [italic yellow]'system status'[/italic yellow] or [italic yellow]'diagnostics'[/italic yellow] (CPU, RAM, Battery)")
@@ -705,25 +744,47 @@ def display_hud(device_name: str, threshold: float):
 def main():
     """Main voice loop."""
     voice = JarvisVoice()
+
+    # Diagnostic: Check if Windows has an active microphone
+    mic_active, mic_name, mic_state = check_microphone_hardware_status()
+
     ear = JarvisEar()
     engine = JarvisTaskEngine(voice)
 
-    # Initial microphone calibration
-    console.print("[dim cyan]Calibrating microphone sensitivity...[/dim cyan]")
     ear.calibrate(duration_sec=0.3)
+    display_hud(ear.device_name, ear.speech_threshold, mic_active)
 
-    display_hud(ear.device_name, ear.speech_threshold)
+    if not mic_active:
+        console.print(Panel(
+            "[bold red]⚠️  ATTENTION: MICROPHONE IS CURRENTLY DISABLED IN WINDOWS![/bold red]\n\n"
+            "Windows has disabled your microphone, so it cannot hear your voice yet.\n\n"
+            "[bold white]To enable your microphone in 3 clicks:[/bold white]\n"
+            "  1. Look at the [bold cyan]Sound Recording[/bold cyan] window that just opened on your screen.\n"
+            "  2. In the list, right-click on [bold green]'Microphone Array'[/bold green] (or your mic).\n"
+            "  3. Click [bold green]'Enable'[/bold green] and then [bold green]'Set as Default Device'[/bold green]!\n"
+            "  4. (If you have an ASUS laptop, also press [bold yellow]F4[/bold yellow] or [bold yellow]Fn + F4[/bold yellow] to unmute the keyboard mic button).\n\n"
+            "[italic cyan]Until you enable it, you can also type any command below and press Enter![/italic cyan]",
+            title="[bold yellow]Hardware Microphone Alert[/bold yellow]",
+            box=ROUNDED,
+            style="yellow",
+        ))
+        # Open the Windows Recording Devices control panel automatically
+        try:
+            subprocess.Popen("control.exe mmsys.cpl,,1", shell=True)
+        except Exception:
+            pass
 
-    # Initial Greeting
-    voice.speak("All systems initialized. J.A.R.V.I.S. voice protocol active. I am at your command, sir.")
+        voice.speak("Notice: Sir, your microphone appears to be disabled in your Windows Sound settings. Please right click Microphone Array in the Sound window and click Enable. In the meantime, you can also type your commands.")
+    else:
+        voice.speak("All systems initialized. J.A.R.V.I.S. voice protocol active. I am at your command, sir.")
 
     running = True
     while running:
         try:
             try:
-                console.print("\n[bold green]● [LISTENING...][/bold green] [dim white](Speak or type command)[/dim white]")
+                console.print("\n[bold green]● [LISTENING...][/bold green] [dim white](Speak or type your command)[/dim white]")
             except Exception:
-                print("\n[LISTENING...] (Speak or type command)")
+                print("\n[LISTENING...] (Speak or type your command)")
 
             recognized_text = ear.listen(timeout_sec=5.0)
 
