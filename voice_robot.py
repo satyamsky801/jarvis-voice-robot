@@ -469,68 +469,100 @@ class JarvisVoice:
 # 2. FAST VOICE LISTENER (0.75s Latency + Background Safe)
 # ===========================================================================
 class JarvisEar:
-    """Fast audio capture stream with 0.75s silence cutoff and self-voice feedback guard."""
+    """Fast audio capture stream with 0.85s silence cutoff, high-pass filtering, and adaptive noise gate."""
 
     def __init__(self, voice: Optional[JarvisVoice] = None, mascot=None):
         self.voice = voice
         self.mascot = mascot
         self.recognizer = sr.Recognizer()
+        self.recognizer.dynamic_energy_threshold = False
         self.input_device, self.device_name = self._find_best_input_device()
         device_info = sd.query_devices(self.input_device)
         self.sample_rate = int(device_info.get("default_samplerate", 44100))
         self.channels = min(2, max(1, device_info.get("max_input_channels", 1)))
-        self.speech_threshold = 0.005
-        self.ambient_rms = 0.001
+        self.speech_threshold = 0.035
+        self.ambient_rms = 0.005
+        # High-pass filter at 100Hz to eliminate fan rumble and 50Hz mains hum
+        self.hp_sos = scipy.signal.butter(2, 100, 'highpass', fs=self.sample_rate, output='sos')
 
     def _find_best_input_device(self) -> Tuple[int, str]:
-        """Find the working microphone input device, prioritizing Microphone Array."""
+        """
+        Find the working microphone input device.
+        Prioritizes integrated Microphone Array (the laptop physical microphone).
+        """
+        # 1. Environment variable override
+        env_dev = os.getenv("JARVIS_INPUT_DEVICE")
+        if env_dev is not None:
+            try:
+                dev_idx = int(env_dev)
+                info = sd.query_devices(dev_idx)
+                if info.get("max_input_channels", 0) > 0:
+                    return dev_idx, info.get("name", "")
+            except Exception:
+                pass
+
         devices = sd.query_devices()
+
+        # 2. Prioritize Microphone Array (the built-in physical laptop microphone array)
         for i, d in enumerate(devices):
             if d.get("max_input_channels", 0) > 0:
                 name = d.get("name", "").lower()
                 if "array" in name:
-                    return i, d.get("name", "")
+                    try:
+                        sr_test = int(d.get("default_samplerate", 44100))
+                        with sd.InputStream(device=i, channels=1, samplerate=sr_test):
+                            pass
+                        return i, d.get("name", "")
+                    except Exception:
+                        continue
 
+        # 3. Fall back to Windows Default Input Device
+        try:
+            def_idx = sd.default.device[0]
+            if def_idx >= 0:
+                info = sd.query_devices(def_idx)
+                if info.get("max_input_channels", 0) > 0:
+                    sr_test = int(info.get("default_samplerate", 44100))
+                    with sd.InputStream(device=def_idx, channels=1, samplerate=sr_test):
+                        pass
+                    return def_idx, info.get("name", "")
+        except Exception:
+            pass
+
+        # 4. Any other microphone
         for i, d in enumerate(devices):
             if d.get("max_input_channels", 0) > 0:
                 name = d.get("name", "").lower()
-                if "mic" in name:
+                if any(w in name for w in ["mic", "input"]) and "stereo mix" not in name:
                     return i, d.get("name", "")
 
-        for i, d in enumerate(devices):
-            if d.get("max_input_channels", 0) > 0:
-                return i, d.get("name", "")
+        return 2, "Microphone Array"
 
-        return 1, "Microphone Array"
-
-    def calibrate(self, duration_sec: float = 0.3):
-        """Calibrate ambient background noise level."""
-        audio_q = queue.Queue()
-
-        def callback(indata, frames, time_info, status):
-            audio_q.put(indata.copy())
-
+    def calibrate(self, duration_sec: float = 0.5):
+        """Calibrate ambient background noise level and dynamic speech threshold."""
         try:
-            with sd.InputStream(
-                device=self.input_device,
-                channels=self.channels,
-                samplerate=self.sample_rate,
-                dtype="float32",
-                callback=callback,
-            ):
-                time.sleep(duration_sec)
+            sr = self.sample_rate
+            ch = self.channels
+            rec = sd.rec(int(sr * duration_sec), samplerate=sr, channels=ch, device=self.input_device, dtype="float32")
+            sd.wait()
+            if len(rec) > 0:
+                # Apply highpass filter to ignore low-frequency electrical or fan hum
+                if rec.ndim > 1:
+                    mono = rec.mean(axis=1)
+                else:
+                    mono = rec.squeeze()
+                filtered = scipy.signal.sosfilt(self.hp_sos, mono)
+                self.ambient_rms = float(np.sqrt(np.mean(np.square(filtered))))
+                peak = float(np.max(np.abs(filtered)))
+                # Set speech threshold safely above ambient noise floor
+                self.speech_threshold = max(0.040, self.ambient_rms * 2.4, peak * 1.30)
+                safe_print(f"🎤 [Mic Calibrated: Device='{self.device_name}', Noise={self.ambient_rms:.4f}, Threshold={self.speech_threshold:.4f}]", "dim green")
+        except Exception as e:
+            self.ambient_rms = 0.005
+            self.speech_threshold = 0.040
 
-            chunks = [audio_q.get() for _ in range(audio_q.qsize())]
-            if chunks:
-                all_audio = np.concatenate(chunks, axis=0)
-                rms = float(np.sqrt(np.mean(np.square(all_audio))))
-                self.ambient_rms = rms
-                self.speech_threshold = max(0.003, min(0.020, self.ambient_rms * 1.4))
-        except Exception:
-            self.speech_threshold = 0.005
-
-    def record_phrase(self, max_duration_sec: float = 6.0, silence_cutoff: float = 0.75) -> Tuple[Optional[sr.AudioData], Optional[str]]:
-        """Record speech with ultra-fast 0.75s silence cutoff and feedback guard."""
+    def record_phrase(self, max_duration_sec: float = 7.0, silence_cutoff: float = 0.85) -> Tuple[Optional[sr.AudioData], Optional[str]]:
+        """Record speech with dynamic noise gate, silence cutoff, and transient filtering."""
         if self.voice and self.voice.is_speaking:
             time.sleep(0.1)
             return None, None
@@ -555,6 +587,7 @@ class JarvisEar:
 
         recorded_chunks = []
         speech_started = False
+        consecutive_speech = 0
         silence_time = 0.0
         start_time = time.time()
         typed_chars = []
@@ -583,31 +616,46 @@ class JarvisEar:
                     continue
 
                 chunk_dur = len(chunk) / self.sample_rate
-                rms = float(np.sqrt(np.mean(np.square(chunk))))
 
-                if rms > self.speech_threshold:
-                    if not speech_started:
-                        speech_started = True
-                        safe_print("🎙️ [Hearing voice... Speak now]", "bold cyan")
-                    silence_time = 0.0
-                    recorded_chunks.append(chunk)
-                elif speech_started:
-                    silence_time += chunk_dur
-                    recorded_chunks.append(chunk)
-                    if silence_time >= silence_cutoff:
-                        break
+                # Filter chunk to test voice frequencies above fan rumble
+                if chunk.ndim > 1:
+                    mono = chunk.mean(axis=1)
+                else:
+                    mono = chunk.squeeze()
+                filtered = scipy.signal.sosfilt(self.hp_sos, mono)
+                rms = float(np.sqrt(np.mean(np.square(filtered))))
+
+                if not speech_started:
+                    if rms > self.speech_threshold:
+                        consecutive_speech += 1
+                        if consecutive_speech >= 2:  # 100ms of sustained speech
+                            speech_started = True
+                            safe_print("🎙️ [Hearing voice... Speak now]", "bold cyan")
+                            if self.mascot:
+                                self.mascot.set_state("listen", text="Hearing you...", title="LISTENING", duration=4.0)
+                            recorded_chunks.append(chunk)
+                    else:
+                        consecutive_speech = 0
+                        recorded_chunks.append(chunk)
+                        max_pre = int(0.25 / max(0.01, chunk_dur))
+                        if len(recorded_chunks) > max_pre:
+                            recorded_chunks.pop(0)
                 else:
                     recorded_chunks.append(chunk)
-                    max_pre = int(0.2 / max(0.01, chunk_dur))
-                    if len(recorded_chunks) > max_pre:
-                        recorded_chunks.pop(0)
+                    if rms < self.speech_threshold:
+                        silence_time += chunk_dur
+                        if silence_time >= silence_cutoff:
+                            break
+                    else:
+                        silence_time = 0.0
 
         if typed_chars:
             typed = "".join(typed_chars).strip()
             if typed:
                 return None, typed
 
-        if not speech_started or not recorded_chunks:
+        total_dur = len(recorded_chunks) * chunk_dur if recorded_chunks else 0
+        if not speech_started or not recorded_chunks or total_dur < 0.25:
             return None, None
 
         full_audio = np.concatenate(recorded_chunks, axis=0)
@@ -616,22 +664,25 @@ class JarvisEar:
         elif full_audio.ndim > 1:
             full_audio = full_audio[:, 0]
 
+        # High-pass filter entire speech before resample
+        full_audio = scipy.signal.sosfilt(self.hp_sos, full_audio)
+
         target_samples = int(len(full_audio) * 16000 / self.sample_rate)
         resampled = scipy.signal.resample(full_audio, target_samples)
 
         peak = float(np.max(np.abs(resampled)))
-        if peak > 0.0001:
-            resampled = resampled * (0.8 / peak)
+        if peak > 0.04:
+            resampled = resampled * min(2.5, 0.75 / peak)
 
         pcm16 = (np.clip(resampled, -1.0, 1.0) * 32767).astype(np.int16).tobytes()
         return sr.AudioData(pcm16, 16000, 2), None
 
-    def listen(self, timeout_sec: float = 5.0) -> str:
+    def listen(self, timeout_sec: float = 6.0) -> str:
         """Listen to the microphone and transcribe spoken words."""
         if self.mascot:
             self.mascot.set_state("listen", text="Listening...", title="MIC ACTIVE", duration=timeout_sec)
 
-        audio_data, typed_text = self.record_phrase(max_duration_sec=timeout_sec, silence_cutoff=0.75)
+        audio_data, typed_text = self.record_phrase(max_duration_sec=timeout_sec, silence_cutoff=0.85)
         if typed_text:
             if self.mascot:
                 self.mascot.set_state("think", text=f'"{typed_text}"', title="TYPED", duration=3.0)
@@ -643,27 +694,32 @@ class JarvisEar:
 
         try:
             safe_print("⚡ [Processing speech...]", "bold yellow")
+            if self.mascot:
+                self.mascot.set_state("think", text="Thinking...", title="PROCESSING", duration=3.0)
+
             text = self.recognizer.recognize_google(audio_data)
             clean = text.strip()
             if clean:
                 log_session_event("HEARD", clean)
                 if self.mascot:
                     self.mascot.set_state("think", text=f'"{clean}"', title="HEARD", duration=3.0)
+                return clean
             else:
-                if self.mascot and getattr(self.mascot, "state", "") == "listen":
+                if self.mascot and getattr(self.mascot, "state", "") in ["listen", "think"]:
                     self.mascot.set_state("idle")
-            return clean
+                return ""
         except sr.UnknownValueError:
-            if self.mascot and getattr(self.mascot, "state", "") == "listen":
+            safe_print("🔇 [Speech unclear or no words detected]", "dim")
+            if self.mascot and getattr(self.mascot, "state", "") in ["listen", "think"]:
                 self.mascot.set_state("idle")
             return ""
         except sr.RequestError as e:
             safe_print(f"(Speech network notice: {e})", "dim red")
-            if self.mascot and getattr(self.mascot, "state", "") == "listen":
-                self.mascot.set_state("idle")
+            if self.mascot:
+                self.mascot.set_state("kneedown", text="Speech network issue", title="NETWORK", duration=3.0)
             return ""
         except Exception:
-            if self.mascot and getattr(self.mascot, "state", "") == "listen":
+            if self.mascot and getattr(self.mascot, "state", "") in ["listen", "think"]:
                 self.mascot.set_state("idle")
             return ""
 
@@ -1795,9 +1851,20 @@ def main():
         def on_typed(text: str):
             engine.execute_command(text)
 
-        mascot.on_typed_command = on_typed
+        def on_listen():
+            if mascot:
+                mascot.show_speech("Listening...", title="MIC ACTIVE", duration=5.0)
+                mascot.set_state("listen")
 
-    ear.calibrate(duration_sec=0.3)
+        def on_mute():
+            voice.is_muted = not getattr(voice, "is_muted", False)
+            return voice.is_muted
+
+        mascot.on_typed_command = on_typed
+        mascot.on_trigger_listen = on_listen
+        mascot.on_toggle_mute = on_mute
+
+    ear.calibrate(duration_sec=0.5)
     llm_info = f"{engine.llm_engine.provider.capitalize()} ({engine.llm_engine.model})" if engine.llm_engine else "Local Fast Path"
     display_hud(ear.device_name, ear.speech_threshold, llm_info)
 
