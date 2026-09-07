@@ -107,8 +107,23 @@ kernel32.GlobalUnlock.argtypes = [ctypes.c_void_p]
 user32.SetClipboardData.restype = ctypes.c_void_p
 user32.SetClipboardData.argtypes = [wintypes.UINT, ctypes.c_void_p]
 
-# Assistant Settings
-VOICE_NAME = "en-GB-RyanNeural"  # British J.A.R.V.I.S. voice
+# Assistant Persona & Settings
+# Casual, direct, calm, confident, masculine-leaning natural tone
+ASSISTANT_PERSONA_PROMPT = """You are a helpful assistant with a calm, direct, masculine-leaning tone.
+Speak naturally, like a real person having a conversation.
+Use short sentences and everyday words.
+Be practical, confident, and a little relaxed.
+Avoid overly formal language, filler phrases, and robotic wording.
+Never use stiff honorifics like "sir" or "boss."
+When the user gives a command, answer clearly and directly.
+Keep responses grounded in daily life examples when useful.
+Do not sound aggressive, rude, or disrespectful.
+Do not mention that you are trying to sound like a man.
+Use natural contractions like "I'm," "you're," "that's," "let's."
+Do not over-explain unless asked. Give one clear, practical answer instead of ten options.
+"""
+
+VOICE_NAME = os.getenv("JARVIS_TTS_VOICE", "en-US-GuyNeural")  # Calm, confident masculine-leaning voice
 WAKE_WORDS = ["jarvis", "hey jarvis", "robot", "hello jarvis"]
 NOTES_FILE = Path("jarvis_notes.txt")
 SCREENSHOTS_DIR = Path(os.path.expanduser("~/Pictures/Jarvis_Screenshots"))
@@ -751,7 +766,7 @@ class JarvisTaskEngine:
             "i was saying", "listen to me", "can you hear me", "are you listening",
             "do you hear me", "hello jarvis", "hey jarvis", "jarvis"
         ]:
-            self.voice.speak("I am listening attentively, sir. Please go ahead.")
+            self.voice.speak("I'm listening. Go ahead.")
             return True
 
         clean_q = self._strip_prefixes(raw_norm)
@@ -762,7 +777,7 @@ class JarvisTaskEngine:
         # 1. Exit / Shutdown Commands (ONLY condition that stops the loop)
         # -------------------------------------------------------------
         if any(word in clean_q for word in ["exit", "quit", "goodbye", "go to sleep", "sleep now", "shutdown jarvis", "power down"]):
-            self.voice.speak("Powering down voice protocols. Have a great day, sir.")
+            self.voice.speak("Catch you later. Shutting down.")
             return False
 
         # -------------------------------------------------------------
@@ -775,7 +790,7 @@ class JarvisTaskEngine:
                         p.kill()
                     except Exception:
                         pass
-            self.voice.speak("Microsoft Edge has been closed, sir.")
+            self.voice.speak("Closed Edge.")
             return True
 
         # -------------------------------------------------------------
@@ -783,42 +798,42 @@ class JarvisTaskEngine:
         # -------------------------------------------------------------
         if any(w in clean_q for w in ["close tab", "close this tab", "close current tab"]):
             send_browser_hotkey(VK_CONTROL, VK_W)
-            self.voice.speak("Tab closed, sir.")
+            self.voice.speak("Tab's closed.")
             return True
 
         if any(w in clean_q for w in ["close all tabs", "close all windows", "close browser"]):
             send_browser_hotkey(VK_CONTROL, VK_SHIFT, VK_W)
-            self.voice.speak("Browser tabs closed, sir.")
+            self.voice.speak("Closed the browser.")
             return True
 
         if any(w in clean_q for w in ["open new tab", "open a new tab", "new tab"]):
             send_browser_hotkey(VK_CONTROL, VK_T)
-            self.voice.speak("New tab opened, sir.")
+            self.voice.speak("New tab opened.")
             return True
 
         if any(w in clean_q for w in ["reopen closed tab", "reopen last closed tab", "reopen last tab", "undo close tab"]):
             send_browser_hotkey(VK_CONTROL, VK_SHIFT, VK_T)
-            self.voice.speak("Reopened last closed tab, sir.")
+            self.voice.speak("Got it, reopened that last tab.")
             return True
 
         if any(w in clean_q for w in ["switch to next tab", "next tab"]):
             send_browser_hotkey(VK_CONTROL, VK_TAB)
-            self.voice.speak("Switched to next tab, sir.")
+            self.voice.speak("Switched to the next tab.")
             return True
 
         if any(w in clean_q for w in ["switch to previous tab", "previous tab"]):
             send_browser_hotkey(VK_CONTROL, VK_SHIFT, VK_TAB)
-            self.voice.speak("Switched to previous tab, sir.")
+            self.voice.speak("Back to the previous tab.")
             return True
 
         if any(w in clean_q for w in ["bookmark this page", "bookmark page", "bookmark tab"]):
             send_browser_hotkey(VK_CONTROL, VK_D)
-            self.voice.speak("Page bookmarked, sir.")
+            self.voice.speak("Bookmarked.")
             return True
 
         if any(w in clean_q for w in ["refresh page", "reload tab", "reload page"]):
             send_browser_hotkey(VK_CONTROL, VK_R)
-            self.voice.speak("Page refreshed, sir.")
+            self.voice.speak("Page refreshed.")
             return True
 
         # -------------------------------------------------------------
@@ -826,62 +841,62 @@ class JarvisTaskEngine:
         # -------------------------------------------------------------
         if any(w in clean_q for w in ["pause video", "pause the video", "resume video", "resume the video", "pause", "resume", "stop video"]):
             send_youtube_hotkey(VK_K)
-            self.voice.speak("Video playback toggled, sir.")
+            self.voice.speak("Toggled playback.")
             return True
 
         if any(w in clean_q for w in ["mute video", "unmute video"]):
             send_youtube_hotkey(VK_M)
-            self.voice.speak("Video sound toggled, sir.")
+            self.voice.speak("Sound toggled.")
             return True
 
         if any(w in clean_q for w in ["full screen", "fullscreen", "exit full screen", "theater mode"]):
             send_youtube_hotkey(VK_F)
-            self.voice.speak("Video display toggled, sir.")
+            self.voice.speak("Fullscreen toggled.")
             return True
 
         if any(w in clean_q for w in ["turn on captions", "turn off captions", "captions", "subtitles", "enable subtitles in hindi"]):
             send_youtube_hotkey(VK_C)
-            self.voice.speak("Captions and subtitles toggled, sir.")
+            self.voice.speak("Toggled captions.")
             return True
 
         if any(w in clean_q for w in ["change video quality to 1080p", "change video quality", "video quality", "quality to 1080p", "1080p"]):
             send_youtube_hotkey(VK_SHIFT, ord('S'))
-            self.voice.speak("Opening video settings, sir. You can select 1080p from the quality menu.")
+            self.voice.speak("Opening video settings so you can pick 1080p.")
             return True
 
         if any(w in clean_q for w in ["next video", "skip video", "play next video"]):
             send_youtube_hotkey(VK_SHIFT, VK_N)
-            self.voice.speak("Playing next video, sir.")
+            self.voice.speak("Playing the next one.")
             return True
 
         if any(w in clean_q for w in ["previous video", "play previous video"]):
             send_youtube_hotkey(VK_SHIFT, VK_P)
-            self.voice.speak("Playing previous video, sir.")
+            self.voice.speak("Going back to the last video.")
             return True
 
         if any(w in clean_q for w in ["forward 10 seconds", "fast forward", "skip forward"]):
             send_youtube_hotkey(VK_L)
-            self.voice.speak("Skipped forward, sir.")
+            self.voice.speak("Skipped ahead ten seconds.")
             return True
 
         if any(w in clean_q for w in ["rewind 10 seconds", "rewind", "skip back"]):
             send_youtube_hotkey(VK_J)
-            self.voice.speak("Rewound, sir.")
+            self.voice.speak("Rewound ten seconds.")
             return True
 
         if any(w in clean_q for w in ["trending videos", "go to trending", "trending on youtube"]):
             navigate_browser_url("https://www.youtube.com/feed/trending")
-            self.voice.speak("Opening trending videos on YouTube, sir.")
+            self.voice.speak("Pulling up trending videos on YouTube.")
             return True
 
         if any(w in clean_q for w in ["my subscriptions", "open subscriptions", "open my subscriptions"]):
             navigate_browser_url("https://www.youtube.com/feed/subscriptions")
-            self.voice.speak("Opening your subscriptions on YouTube, sir.")
+            self.voice.speak("Opening your subscriptions.")
             return True
 
         if any(w in clean_q for w in ["show my watch history", "watch history", "my watch history"]):
             navigate_browser_url("https://www.youtube.com/feed/history")
-            self.voice.speak("Opening your YouTube watch history, sir.")
+            self.voice.speak("Here's your watch history.")
             return True
 
         # -------------------------------------------------------------
@@ -893,7 +908,7 @@ class JarvisTaskEngine:
             "launch youtube", "go to youtube", "youtube", "start youtube"
         ]:
             navigate_browser_url("https://www.youtube.com")
-            self.voice.speak("Opening YouTube in Chrome now, sir.")
+            self.voice.speak("Opening YouTube in Chrome.")
             return True
 
         is_youtube = any(w in clean_q.split() for w in ["youtube", "yt"]) or "youtube" in clean_q or clean_q.startswith("play ")
@@ -931,11 +946,11 @@ class JarvisTaskEngine:
             if search_query:
                 url = f"https://www.youtube.com/results?search_query={urllib.parse.quote_plus(search_query)}"
                 navigate_browser_url(url)
-                self.voice.speak(f"Searching YouTube for {search_query}, sir.")
+                self.voice.speak(f"Searching YouTube for {search_query}.")
                 return True
 
             navigate_browser_url("https://www.youtube.com")
-            self.voice.speak("Opening YouTube in Chrome now, sir.")
+            self.voice.speak("Opening YouTube in Chrome.")
             return True
 
         # -------------------------------------------------------------
@@ -943,7 +958,7 @@ class JarvisTaskEngine:
         # -------------------------------------------------------------
         math_result = self._evaluate_math(clean_q)
         if math_result is not None:
-            self.voice.speak(f"The answer is {math_result}, sir.")
+            self.voice.speak(f"That's {math_result}.")
             return True
 
         # -------------------------------------------------------------
@@ -953,23 +968,23 @@ class JarvisTaskEngine:
         if m_vol:
             percent = max(0, min(100, int(m_vol.group(1))))
             self._set_volume_percentage(percent)
-            self.voice.speak(f"Master volume set to {percent} percent, sir.")
+            self.voice.speak(f"Volume's set to {percent}%.")
             return True
 
         if any(w in clean_q for w in ["volume up", "increase volume", "louder"]):
             self._adjust_volume(up=True, steps=5)
-            self.voice.speak("Volume increased, sir.")
+            self.voice.speak("Turned it up.")
             return True
 
         if any(w in clean_q for w in ["volume down", "decrease volume", "lower volume", "quieter"]):
             self._adjust_volume(up=False, steps=5)
-            self.voice.speak("Volume decreased, sir.")
+            self.voice.speak("Turned it down.")
             return True
 
         if any(w in clean_q for w in ["mute volume", "mute", "unmute volume", "unmute"]):
             user32.keybd_event(VK_VOLUME_MUTE, 0, 0, 0)
             user32.keybd_event(VK_VOLUME_MUTE, 0, 2, 0)
-            self.voice.speak("Master volume toggled, sir.")
+            self.voice.speak("Mute toggled.")
             return True
 
         # -------------------------------------------------------------
@@ -983,24 +998,24 @@ class JarvisTaskEngine:
 
             def timer_thread():
                 time.sleep(seconds)
-                self.voice.speak(f"Sir, your timer for {amount} {unit} has finished!")
+                self.voice.speak(f"Hey, your timer for {amount} {unit} is done!")
 
             threading.Thread(target=timer_thread, daemon=True).start()
-            self.voice.speak(f"Timer set for {amount} {unit}, sir.")
+            self.voice.speak(f"Timer set for {amount} {unit}. I'll let you know when it's done.")
             return True
 
         if "start stopwatch" in clean_q:
             self.stopwatch_start = time.time()
-            self.voice.speak("Stopwatch started, sir.")
+            self.voice.speak("Stopwatch started.")
             return True
 
         if "stop stopwatch" in clean_q:
             if self.stopwatch_start:
                 elapsed = int(time.time() - self.stopwatch_start)
                 self.stopwatch_start = None
-                self.voice.speak(f"Stopwatch stopped at {elapsed} seconds, sir.")
+                self.voice.speak(f"Stopped at {elapsed} seconds.")
             else:
-                self.voice.speak("The stopwatch is not running, sir.")
+                self.voice.speak("The stopwatch isn't running.")
             return True
 
         # -------------------------------------------------------------
@@ -1012,17 +1027,17 @@ class JarvisTaskEngine:
                     dest = clean_q[len(p):].strip()
                     url = f"https://www.google.com/maps/dir/?api=1&destination={urllib.parse.quote_plus(dest)}"
                     open_browser_url(url, prefer_chrome=True)
-                    self.voice.speak(f"Navigating to {dest} on Google Maps, sir.")
+                    self.voice.speak(f"Pulling up directions to {dest} on Google Maps.")
                     return True
 
         if any(w in clean_q for w in ["nearby restaurants", "restaurants near me", "find nearby restaurants"]):
             open_browser_url("https://www.google.com/maps/search/nearby+restaurants", prefer_chrome=True)
-            self.voice.speak("Finding nearby restaurants on Google Maps, sir.")
+            self.voice.speak("Finding nearby restaurants on Google Maps.")
             return True
 
         if any(w in clean_q for w in ["petrol pumps near me", "find petrol pumps", "gas stations near me"]):
             open_browser_url("https://www.google.com/maps/search/petrol+pumps+near+me", prefer_chrome=True)
-            self.voice.speak("Locating nearby petrol stations on Google Maps, sir.")
+            self.voice.speak("Finding petrol pumps nearby.")
             return True
 
         # -------------------------------------------------------------
@@ -1032,7 +1047,7 @@ class JarvisTaskEngine:
             phrase = clean_q.replace("translate ", "").replace("to hindi", "").replace("in hindi", "").strip()
             url = f"https://translate.google.com/?sl=auto&tl=hi&text={urllib.parse.quote_plus(phrase)}"
             open_browser_url(url, prefer_chrome=True)
-            self.voice.speak(f"Translating '{phrase}' to Hindi in Chrome, sir.")
+            self.voice.speak(f"Translating '{phrase}' to Hindi.")
             return True
 
         # -------------------------------------------------------------
@@ -1040,31 +1055,31 @@ class JarvisTaskEngine:
         # -------------------------------------------------------------
         if clean_q in ["open whatsapp", "launch whatsapp", "whatsapp"]:
             open_browser_url("https://web.whatsapp.com", prefer_chrome=True)
-            self.voice.speak("Opening WhatsApp in Chrome, sir.")
+            self.voice.speak("Opening WhatsApp.")
             return True
 
         if clean_q in ["open instagram", "launch instagram", "instagram"]:
             open_browser_url("https://www.instagram.com", prefer_chrome=True)
-            self.voice.speak("Opening Instagram in Chrome, sir.")
+            self.voice.speak("Opening Instagram.")
             return True
 
         if clean_q in ["open spotify", "launch spotify", "spotify"]:
             try:
                 subprocess.Popen("start spotify:", shell=True)
-                self.voice.speak("Launching Spotify, sir.")
+                self.voice.speak("Opening Spotify.")
             except Exception:
                 open_browser_url("https://open.spotify.com", prefer_chrome=True)
-                self.voice.speak("Opening Spotify Web Player, sir.")
+                self.voice.speak("Opening Spotify Web Player.")
             return True
 
         if "whatsapp message" in clean_q or clean_q.startswith("send a whatsapp message"):
             open_browser_url("https://web.whatsapp.com", prefer_chrome=True)
-            self.voice.speak("Opening WhatsApp Web. Please select the contact to send your message, sir.")
+            self.voice.speak("Opening WhatsApp Web. Select the contact to send your message.")
             return True
 
         if any(w in clean_q for w in ["open camera", "take a photo", "record a video"]):
             subprocess.Popen("start microsoft.windows.camera:", shell=True)
-            self.voice.speak("Launching Windows Camera, sir.")
+            self.voice.speak("Opening the camera.")
             return True
 
         # -------------------------------------------------------------
@@ -1072,12 +1087,12 @@ class JarvisTaskEngine:
         # -------------------------------------------------------------
         if "timer" not in clean_q and any(w in clean_q for w in ["time", "clock"]):
             now_str = datetime.datetime.now().strftime("%I:%M %p")
-            self.voice.speak(f"The current time is {now_str}, sir.")
+            self.voice.speak(f"It's {now_str}.")
             return True
 
         if any(w in clean_q.split() for w in ["date", "today"]) or any(p in clean_q for p in ["day is it", "day of the week", "what day", "what's the date", "what is the date"]):
             date_str = datetime.datetime.now().strftime("%A, %B %d, %Y")
-            self.voice.speak(f"Today is {date_str}, sir.")
+            self.voice.speak(f"Today is {date_str}.")
             return True
 
         # -------------------------------------------------------------
@@ -1099,11 +1114,10 @@ class JarvisTaskEngine:
             disk = psutil.disk_usage("/").percent
             battery = psutil.sensors_battery()
 
-            report = f"System diagnostics complete, sir. CPU utilization is at {cpu:.0f} percent. Memory usage is at {ram:.0f} percent. Primary storage drive is {disk:.0f} percent full."
+            report = f"System's running smooth. CPU is at {cpu:.0f}%, memory's at {ram:.0f}%, and your drive is {disk:.0f}% full."
             if battery:
-                plugged = "and charging" if battery.power_plugged else "discharging"
-                report += f" Battery power is at {battery.percent:.0f} percent, {plugged}."
-            report += " All core systems operating normally."
+                plugged = "and charging" if battery.power_plugged else "on battery"
+                report += f" Battery's at {battery.percent:.0f}%, {plugged}."
             self.voice.speak(report)
             return True
 
@@ -1115,7 +1129,7 @@ class JarvisTaskEngine:
                 subprocess.Popen("start ms-windows-store:updates", shell=True)
             except Exception:
                 pass
-            self.voice.speak("Opening updates to check and update your applications, sir.")
+            self.voice.speak("Checking for app updates now.")
             return True
 
         m_uninst = re.search(r"uninstall\s+(.+)", clean_q)
@@ -1125,7 +1139,7 @@ class JarvisTaskEngine:
                 subprocess.Popen("start ms-settings:appsfeatures", shell=True)
             except Exception:
                 pass
-            self.voice.speak(f"Opening Windows Installed Apps to uninstall {target_app}, sir.")
+            self.voice.speak(f"Opening installed apps so you can remove {target_app}.")
             return True
 
         popular_sites = {
@@ -1153,18 +1167,18 @@ class JarvisTaskEngine:
 
             if any(w in app_name.split() for w in ["yt", "youtube"]):
                 navigate_browser_url("https://www.youtube.com")
-                self.voice.speak("Opening YouTube in Chrome now, sir.")
+                self.voice.speak("Opening YouTube in Chrome.")
                 return True
 
             if app_name in popular_sites:
                 open_browser_url(popular_sites[app_name], prefer_chrome=True)
-                self.voice.speak(f"Opening {app_name.capitalize()} in Chrome, sir.")
+                self.voice.speak(f"Opening {app_name.capitalize()}.")
                 return True
 
             if re.search(r"\.(com|org|net|in|io|co|ai|edu|gov)$", app_name):
                 url = app_name if app_name.startswith("http") else f"https://{app_name}"
                 open_browser_url(url, prefer_chrome=True)
-                self.voice.speak(f"Opening {app_name} in Chrome, sir.")
+                self.voice.speak(f"Opening {app_name}.")
                 return True
 
             self._open_application(app_name)
@@ -1179,7 +1193,7 @@ class JarvisTaskEngine:
                             p.kill()
                         except Exception:
                             pass
-                self.voice.speak("Microsoft Edge has been closed, sir.")
+                self.voice.speak("Closed Edge.")
                 return True
             self._close_application(app_name)
             return True
@@ -1194,7 +1208,7 @@ class JarvisTaskEngine:
                     if search_query:
                         url = f"https://www.google.com/search?q={urllib.parse.quote_plus(search_query)}"
                         open_browser_url(url, prefer_chrome=True)
-                        self.voice.speak(f"Searching Google for {search_query}, sir.")
+                        self.voice.speak(f"Searching Google for {search_query}.")
                         return True
 
         # -------------------------------------------------------------
@@ -1213,12 +1227,12 @@ class JarvisTaskEngine:
                     note_content = clean_q[len(p):].strip()
                     break
             if not note_content:
-                self.voice.speak("What should the note say, sir?")
+                self.voice.speak("What should the note say?")
                 return True
             timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
             with open(NOTES_FILE, "a", encoding="utf-8") as f:
                 f.write(f"[{timestamp}] {note_content}\n")
-            self.voice.speak(f"Note saved, sir: {note_content}")
+            self.voice.speak(f"Saved that note: {note_content}")
             return True
 
         if any(w in clean_q for w in ["read my notes", "check my notes", "what are my notes", "read notes", "show notes"]):
@@ -1228,7 +1242,7 @@ class JarvisTaskEngine:
         if any(w in clean_q for w in ["clear notes", "delete notes"]):
             if NOTES_FILE.exists():
                 NOTES_FILE.unlink()
-            self.voice.speak("All notes have been cleared, sir.")
+            self.voice.speak("All notes cleared.")
             return True
 
         # -------------------------------------------------------------
@@ -1248,49 +1262,93 @@ class JarvisTaskEngine:
         # 18. Lock Screen
         # -------------------------------------------------------------
         if any(w in clean_q for w in ["lock computer", "lock pc", "lock screen", "lock workstation"]):
-            self.voice.speak("Locking workstation now, sir.")
+            self.voice.speak("Locking your screen.")
             user32.LockWorkStation()
             return True
 
         # -------------------------------------------------------------
-        # 19. Natural Dialogue & Chat
+        # 19. Daily Life Commands & Practical Advice
+        # -------------------------------------------------------------
+        if any(w in clean_q for w in ["grocery list", "groceries for the week", "make a grocery list", "groceries list"]):
+            msg = "Here's a solid weekly list: eggs, milk, bread, chicken or paneer, rice, onions, tomatoes, bananas, oats, and coffee. Simple, healthy, and covers the week."
+            self.voice.speak(msg)
+            try:
+                timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+                with open(NOTES_FILE, "a", encoding="utf-8") as f:
+                    f.write(f"[{timestamp}] Weekly Groceries: eggs, milk, bread, chicken/paneer, rice, onions, tomatoes, bananas, oats, coffee\n")
+            except Exception:
+                pass
+            return True
+
+        if any(w in clean_q for w in ["morning routine", "plan my morning", "how should i start my day", "morning plan"]):
+            msg = "Keep it simple: wake up, drink a big glass of water, get twenty minutes of exercise, take a shower, and eat a solid breakfast before opening your phone."
+            self.voice.speak(msg)
+            return True
+
+        if any(w in clean_q for w in ["easiest way to fix this", "how to fix this", "easiest way to fix", "how do i fix this", "fix this"]):
+            msg = "First move: restart the app or reboot the machine. If that doesn't do it, check your connection and undo whatever you changed last."
+            self.voice.speak(msg)
+            return True
+
+        if any(w in clean_q for w in ["keep it simple and practical", "keep it simple", "give one clear answer", "no options", "keep it practical", "straight to the point"]):
+            msg = "You got it. Straight to the point, no fluff."
+            self.voice.speak(msg)
+            return True
+
+        if any(w in clean_q for w in ["workout routine", "plan my workout", "quick workout", "exercise routine", "workout plan", "workout"]):
+            msg = "Do three quick rounds: fifteen push-ups, twenty squats, a thirty-second plank, and ten burpees. Takes fifteen minutes and hits the whole body."
+            self.voice.speak(msg)
+            return True
+
+        if any(w in clean_q for w in ["what should i eat", "dinner idea", "what to eat for dinner", "quick dinner", "lunch idea", "healthy meal", "make for dinner", "what should i make for dinner", "dinner"]):
+            msg = "Keep it easy: grilled chicken or paneer with sautéed veggies and rice, or a quick egg scramble with toast. Fast, healthy, and minimal cleanup."
+            self.voice.speak(msg)
+            return True
+
+        if any(w in clean_q for w in ["help me focus", "stop procrastinating", "how to focus", "productivity tip", "procrastinat"]):
+            msg = "Put your phone in another room, set a timer for twenty-five minutes, and lock in on just one task until it rings. Momentum builds fast."
+            self.voice.speak(msg)
+            return True
+
+        # -------------------------------------------------------------
+        # 20. Natural Dialogue & Chat (Casual, Direct, Masculine-Leaning)
         # -------------------------------------------------------------
         if any(p in raw_norm for p in ["not saying that", "i didn't say that", "did not say that", "not that", "that's wrong", "i didn't mean that"]):
-            self.voice.speak("My apologies, sir. Please tell me what you would like me to do.")
+            self.voice.speak("My bad, what did you want me to do?")
             return True
 
         if raw_norm in ["hello", "hi", "hey", "are you there", "wake up"]:
-            self.voice.speak("At your service, sir. What can I do for you?")
+            self.voice.speak("Hey, what's up? I'm right here.")
             return True
 
         if any(p in raw_norm for p in ["how are you", "how are things", "how's it going"]):
-            self.voice.speak("All my subroutines are fully operational, sir. How are you doing today?")
+            self.voice.speak("Doing good, man. Ready to get things done. What are we working on?")
             return True
 
         if "who are you" in raw_norm or "what is your name" in raw_norm:
-            self.voice.speak("I am J.A.R.V.I.S., your autonomous voice assistant. Ready for your instructions, sir.")
+            self.voice.speak("I'm Jarvis. Ready whenever you are.")
             return True
 
         if any(p in raw_norm for p in ["thank you", "thanks", "good job", "well done"]):
-            self.voice.speak("You are most welcome, sir.")
+            self.voice.speak("Anytime, man.")
             return True
 
         if any(p in raw_norm for p in ["who made you", "who created you"]):
-            self.voice.speak("I was created as an autonomous J.A.R.V.I.S. voice robot assistant, inspired by Tony Stark's system, sir.")
+            self.voice.speak("Built as a fast, practical voice assistant for daily life.")
             return True
 
         if any(p in raw_norm for p in ["tell me a joke", "make me laugh"]):
             jokes = [
-                "Why do programmers prefer dark mode? Because light attracts bugs, sir.",
-                "There are 10 types of people in the world: those who understand binary, and those who don't, sir.",
-                "Why was the computer cold? It left its Windows open, sir.",
+                "Why do programmers prefer dark mode? Because light attracts bugs.",
+                "There are 10 types of people: those who understand binary, and those who don't.",
+                "Why was the computer cold? It left its Windows open.",
                 "A SQL query walks into a bar, walks up to two tables and asks: Can I join you?",
             ]
             self.voice.speak(random.choice(jokes))
             return True
 
         # -------------------------------------------------------------
-        # 20. General Knowledge / Q&A (Speaks Answer Directly)
+        # 21. General Knowledge / Q&A (Speaks Answer Directly)
         # -------------------------------------------------------------
         answer = self._get_background_knowledge(clean_q) or self._get_background_knowledge(raw_norm)
         if answer:
@@ -1298,7 +1356,7 @@ class JarvisTaskEngine:
             return True
 
         # Fallback conversational response
-        self.voice.speak("Understood, sir. I am right here listening.")
+        self.voice.speak("Got it. I'm right here listening.")
         return True
 
     def _evaluate_math(self, query: str) -> Optional[str]:
@@ -1339,27 +1397,27 @@ class JarvisTaskEngine:
         clean_name = name.lower().strip()
         if "chrome" in clean_name and any(w in clean_name for w in ["yt", "youtube"]):
             navigate_browser_url("https://www.youtube.com")
-            self.voice.speak("Opening YouTube in Chrome now, sir.")
+            self.voice.speak("Opening YouTube in Chrome.")
             return
 
         if clean_name in ["yt", "youtube"]:
             navigate_browser_url("https://www.youtube.com")
-            self.voice.speak("Opening YouTube in Chrome now, sir.")
+            self.voice.speak("Opening YouTube in Chrome.")
             return
 
         if clean_name in ["chrome", "google chrome"]:
             open_browser_url("https://www.google.com", prefer_chrome=True)
-            self.voice.speak("Opening Google Chrome, sir.")
+            self.voice.speak("Opening Google Chrome.")
             return
 
         for key in sorted(self.app_map.keys(), key=len, reverse=True):
             if key in clean_name:
                 subprocess.Popen(self.app_map[key], shell=True)
-                self.voice.speak(f"Opening {key}, sir.")
+                self.voice.speak(f"Opening {key}.")
                 return
 
         subprocess.Popen(f"start {name}", shell=True)
-        self.voice.speak(f"Launching {name}, sir.")
+        self.voice.speak(f"Launching {name}.")
 
     def _close_application(self, name: str):
         """Close running application."""
@@ -1375,9 +1433,9 @@ class JarvisTaskEngine:
                 pass
 
         if found:
-            self.voice.speak(f"{name} has been closed, sir.")
+            self.voice.speak(f"Closed {name}.")
         else:
-            self.voice.speak(f"Could not locate an active process for {name}, sir.")
+            self.voice.speak(f"Couldn't find an active process for {name}.")
 
     def _adjust_volume(self, up: bool = True, steps: int = 5):
         """Adjust master volume."""
@@ -1403,21 +1461,21 @@ class JarvisTaskEngine:
         """
         try:
             subprocess.run(["powershell", "-Command", ps_cmd], capture_output=True, check=True)
-            self.voice.speak("Screenshot captured and saved to your Pictures folder, sir.")
+            self.voice.speak("Screenshot taken and saved to your Pictures folder.")
         except Exception:
-            self.voice.speak("I encountered an issue capturing the screen, sir.")
+            self.voice.speak("Had an issue capturing the screen.")
 
     def _read_notes(self):
         """Read saved notes."""
         if not NOTES_FILE.exists() or NOTES_FILE.stat().st_size == 0:
-            self.voice.speak("You have no saved notes at this time, sir.")
+            self.voice.speak("You don't have any saved notes right now.")
             return
 
         with open(NOTES_FILE, "r", encoding="utf-8") as f:
             lines = [line.strip() for line in f if line.strip()]
 
         count = len(lines)
-        self.voice.speak(f"You have {count} saved notes, sir. Here are the most recent:")
+        self.voice.speak(f"You've got {count} saved notes. Here are the latest:")
         for line in lines[-3:]:
             self.voice.speak(line)
 
@@ -1432,9 +1490,9 @@ class JarvisTaskEngine:
                 temp_c = current["temp_C"]
                 desc = current["weatherDesc"][0]["value"]
                 humidity = current["humidity"]
-                self.voice.speak(f"The current weather in {city} is {desc} at {temp_c} degrees Celsius with {humidity} percent humidity, sir.")
+                self.voice.speak(f"Weather in {city} is {desc}, {temp_c} degrees Celsius with {humidity} percent humidity.")
         except Exception:
-            self.voice.speak(f"Could not retrieve weather data for {city} at this time, sir.")
+            self.voice.speak(f"Couldn't get the weather for {city} right now.")
 
     def _get_background_knowledge(self, query: str) -> Optional[str]:
         """Fetch factual knowledge in background and format for spoken response."""
@@ -1497,15 +1555,15 @@ def display_hud(device_name: str, threshold: float):
     ╔═══════════════════════════════════════════════════════════════════════╗
     ║                     J . A . R . V . I . S .                           ║
     ║               Just A Rather Very Intelligent System                   ║
-    ║                  Autonomous Voice Robot Protocol                      ║
+    ║                      Everyday Voice Assistant                         ║
     ╚═══════════════════════════════════════════════════════════════════════╝
     """
     try:
         console.print(Panel(Text(banner, justify="center", style="bold cyan"), box=ROUNDED, style="cyan"))
-        console.print("[dim cyan]Voice Engine:[/dim cyan]     [bold green]Edge-TTS (British J.A.R.V.I.S. Ryan Neural)[/bold green]")
+        console.print("[dim cyan]Voice Engine:[/dim cyan]     [bold green]Edge-TTS (Guy Neural - Direct Everyday Tone)[/bold green]")
         console.print(f"[dim cyan]Microphone:[/dim cyan]       [bold green]{device_name} (ACTIVE & UNMUTED 100%)[/bold green]")
         console.print("[dim cyan]Browser Engine:[/dim cyan]   [bold green]Google Chrome Integration (Tab Navigation & Control)[/bold green]")
-        console.print("[dim cyan]Mode:[/dim cyan]             [bold white]Ultra-Fast 1-Sec Latency & In-Place YouTube Navigator[/bold white]")
+        console.print("[dim cyan]Mode:[/dim cyan]             [bold white]Ultra-Fast 1-Sec Latency & Everyday Assistant[/bold white]")
         console.print("[dim cyan]Status:[/dim cyan]           [bold green]Online & Ready (Runs continuously until closed)[/bold green]\n")
     except Exception:
         pass
@@ -1524,7 +1582,7 @@ def main():
     ear.calibrate(duration_sec=0.3)
     display_hud(ear.device_name, ear.speech_threshold)
 
-    voice.speak("All systems online. J.A.R.V.I.S. voice protocol active. Ready for your commands, sir.")
+    voice.speak("Hey, I'm online and listening. What do you need?")
 
     while True:
         try:
@@ -1539,7 +1597,7 @@ def main():
                     break
 
         except KeyboardInterrupt:
-            voice.speak("Emergency stop initiated. Goodbye, sir.")
+            voice.speak("Catch you later. Shutting down.")
             break
         except Exception as e:
             safe_print(f"(System notice: {e})", "dim red")
