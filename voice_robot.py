@@ -3,13 +3,13 @@ J.A.R.V.I.S. — Autonomous Voice Robot Assistant
 Inspired by Tony Stark's J.A.R.V.I.S.
 
 Features:
+- Google Chrome Integration: Opens YouTube and web searches directly in Chrome (not Edge/Explorer)
+- Full YouTube Search Support: Handles "search python in yt", "play music", "open yt in chrome"
 - Fast 1-Second Response Latency (Optimized 0.75s silence cutoff & async execution)
 - Runs in Background 24/7 (Hidden background mode or interactive HUD mode)
 - Persistent Loop (Runs continuously until explicitly closed or told 'exit'/'goodbye')
-- Pure Voice Input & Spoken Dialogue (Talks naturally like Google Assistant)
-- Single-Instance Enforcement (Kills stale background duplicates so voices/windows never double)
+- Single-Instance Enforcement with process tree protection
 - Self-Voice Feedback Guard (Microphone ignores audio while JARVIS is speaking)
-- Dedicated YouTube & Media Engine (Handles "open yt", "open youtube", "play music" without duplicate windows)
 - Zero Unsolicited Command Suggestions (No canned prompts)
 - Auto-Unmute & 100% Hardware Volume Boost (Fixes Windows microphone mute)
 - British Ryan Neural Voice via Edge-TTS (100% Free, High Quality)
@@ -94,6 +94,35 @@ def safe_print(message: str, style: str = ""):
         print(message)
     except Exception:
         pass
+
+
+def open_browser_url(url: str, prefer_chrome: bool = True):
+    """
+    Open URL in Google Chrome if installed on Windows.
+    Falls back to Windows default browser only if Chrome is not found.
+    """
+    if prefer_chrome:
+        chrome_paths = [
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+            os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
+            os.path.expandvars(r"%PROGRAMFILES%\Google\Chrome\Application\chrome.exe"),
+        ]
+        for p in chrome_paths:
+            if os.path.exists(p):
+                try:
+                    subprocess.Popen([p, url])
+                    return
+                except Exception:
+                    pass
+
+        try:
+            subprocess.Popen(f'start chrome "{url}"', shell=True)
+            return
+        except Exception:
+            pass
+
+    webbrowser.open(url)
 
 
 # ===========================================================================
@@ -419,7 +448,7 @@ class JarvisEar:
 
 
 # ===========================================================================
-# 3. TASK & CONVERSATION ENGINE (TALKS & ANSWERS LIKE GOOGLE ASSISTANT)
+# 3. TASK & CONVERSATION ENGINE (GOOGLE CHROME FIRST & DIRECT ANSWERS)
 # ===========================================================================
 class JarvisTaskEngine:
     """Fast execution engine: executes commands in under 1 second with clean dialogue."""
@@ -449,8 +478,6 @@ class JarvisTaskEngine:
             "discord": "start discord",
             "edge": "start msedge",
             "paint": "mspaint",
-            "youtube": "start https://www.youtube.com",
-            "yt": "start https://www.youtube.com",
         }
 
     def _normalize(self, text: str) -> str:
@@ -471,6 +498,10 @@ class JarvisTaskEngine:
             "youtub": "youtube",
             "mic": "microphone",
             "yt": "youtube",
+            "serach": "search",
+            "saerch": "search",
+            "seach": "search",
+            "explorar": "explorer",
         }
         words = q.split()
         words = [replacements.get(w, w) for w in words]
@@ -593,7 +624,7 @@ class JarvisTaskEngine:
             return True
 
         if any(p in raw_norm for p in ["what can you do", "help me", "features"]):
-            self.voice.speak("I can launch applications, check your PC system status, play YouTube music, adjust volume, give the time and weather, take notes, and answer your questions directly by speaking, sir.")
+            self.voice.speak("I can launch applications, search YouTube in Chrome, check your PC diagnostics, adjust volume, give time and weather, take notes, and answer questions directly by speaking, sir.")
             return True
 
         if any(p in raw_norm for p in ["tell me a joke", "make me laugh"]):
@@ -666,25 +697,46 @@ class JarvisTaskEngine:
             return True
 
         # -------------------------------------------------------------
-        # 6. Media & YouTube (Immediate Launch in < 1 Second)
+        # 6. Media & YouTube (Always Opens in Google Chrome - Searches & Plays)
         # -------------------------------------------------------------
-        if any(w in clean_q.split() for w in ["youtube", "yt"]) or "youtube" in clean_q or clean_q.startswith("play "):
+        is_youtube = any(w in clean_q.split() for w in ["youtube", "yt"]) or "youtube" in clean_q or clean_q.startswith("play ")
+        if is_youtube:
             now = time.time()
             if (now - self.last_action_time < 2.0) and (clean_q == self.last_action_query):
                 return True
             self.last_action_time = now
             self.last_action_query = clean_q
 
-            if "play" in clean_q:
-                search_query = clean_q.replace("play", "").replace("on youtube", "").replace("youtube", "").replace("on yt", "").replace("yt", "").strip()
-                if search_query:
-                    url = f"https://www.youtube.com/results?search_query={urllib.parse.quote_plus(search_query)}"
-                    webbrowser.open(url)
-                    self.voice.speak(f"Playing {search_query} on YouTube now, sir.")
-                    return True
+            # Extract search query if present
+            search_query = ""
+            patterns = [
+                r"search\s+(?:for\s+)?(.+?)\s+(?:in|on)\s+(?:youtube|yt)",
+                r"search\s+(?:on|in)\s+(?:youtube|yt)\s+(?:for\s+)?(.+)",
+                r"(?:in|on)\s+(?:youtube|yt)\s+search\s+(?:for\s+)?(.+)",
+                r"search\s+(?:youtube|yt)\s+(?:for\s+)?(.+)",
+                r"play\s+(.+?)\s+(?:in|on)\s+(?:youtube|yt)",
+                r"play\s+(?:in|on)\s+(?:youtube|yt)\s+(.+)",
+                r"play\s+(.+)",
+                r"find\s+(.+?)\s+(?:in|on)\s+(?:youtube|yt)",
+                r"look up\s+(.+?)\s+(?:in|on)\s+(?:youtube|yt)",
+            ]
+            for pattern in patterns:
+                m = re.search(pattern, clean_q)
+                if m:
+                    cand = m.group(1).strip()
+                    cand = re.sub(r"\s+(?:in|on)\s+chrome$", "", cand).strip()
+                    if cand and cand not in ["youtube", "yt"]:
+                        search_query = cand
+                        break
 
-            webbrowser.open("https://www.youtube.com")
-            self.voice.speak("Opening YouTube now, sir.")
+            if search_query:
+                url = f"https://www.youtube.com/results?search_query={urllib.parse.quote_plus(search_query)}"
+                open_browser_url(url, prefer_chrome=True)
+                self.voice.speak(f"Searching YouTube for {search_query}, sir.")
+                return True
+
+            open_browser_url("https://www.youtube.com", prefer_chrome=True)
+            self.voice.speak("Opening YouTube in Chrome now, sir.")
             return True
 
         # -------------------------------------------------------------
@@ -692,9 +744,10 @@ class JarvisTaskEngine:
         # -------------------------------------------------------------
         if any(clean_q.startswith(p) for p in ["open ", "launch ", "start ", "run "]):
             app_name = clean_q.split(" ", 1)[1].strip()
-            if app_name in ["yt", "youtube"]:
-                webbrowser.open("https://www.youtube.com")
-                self.voice.speak("Opening YouTube now, sir.")
+            # If user asks "open yt in chrome" or "open youtube in chrome"
+            if any(w in app_name.split() for w in ["yt", "youtube"]):
+                open_browser_url("https://www.youtube.com", prefer_chrome=True)
+                self.voice.speak("Opening YouTube in Chrome now, sir.")
                 return True
             self._open_application(app_name)
             return True
@@ -705,14 +758,15 @@ class JarvisTaskEngine:
             return True
 
         # -------------------------------------------------------------
-        # 8. Web Search (Explicit Request)
+        # 8. Web Search (Always Opens in Google Chrome)
         # -------------------------------------------------------------
         if any(clean_q.startswith(p) for p in ["search google for ", "google search ", "search on google "]):
             for p in ["search google for ", "google search ", "search on google "]:
                 if clean_q.startswith(p):
                     search_query = clean_q[len(p):].strip()
                     if search_query:
-                        webbrowser.open(f"https://www.google.com/search?q={urllib.parse.quote_plus(search_query)}")
+                        url = f"https://www.google.com/search?q={urllib.parse.quote_plus(search_query)}"
+                        open_browser_url(url, prefer_chrome=True)
                         self.voice.speak(f"Searching Google for {search_query}, sir.")
                         return True
 
@@ -786,9 +840,19 @@ class JarvisTaskEngine:
     def _open_application(self, name: str):
         """Open desktop application immediately."""
         clean_name = name.lower().strip()
+        if "chrome" in clean_name and any(w in clean_name for w in ["yt", "youtube"]):
+            open_browser_url("https://www.youtube.com", prefer_chrome=True)
+            self.voice.speak("Opening YouTube in Chrome now, sir.")
+            return
+
         if clean_name in ["yt", "youtube"]:
-            webbrowser.open("https://www.youtube.com")
-            self.voice.speak("Opening YouTube now, sir.")
+            open_browser_url("https://www.youtube.com", prefer_chrome=True)
+            self.voice.speak("Opening YouTube in Chrome now, sir.")
+            return
+
+        if clean_name in ["chrome", "google chrome"]:
+            open_browser_url("https://www.google.com", prefer_chrome=True)
+            self.voice.speak("Opening Google Chrome, sir.")
             return
 
         for key in sorted(self.app_map.keys(), key=len, reverse=True):
@@ -943,6 +1007,7 @@ def display_hud(device_name: str, threshold: float):
         console.print(Panel(Text(banner, justify="center", style="bold cyan"), box=ROUNDED, style="cyan"))
         console.print("[dim cyan]Voice Engine:[/dim cyan]     [bold green]Edge-TTS (British J.A.R.V.I.S. Ryan Neural)[/bold green]")
         console.print(f"[dim cyan]Microphone:[/dim cyan]       [bold green]{device_name} (ACTIVE & UNMUTED 100%)[/bold green]")
+        console.print("[dim cyan]Default Browser:[/dim cyan]  [bold green]Google Chrome Preferred[/bold green]")
         console.print("[dim cyan]Mode:[/dim cyan]             [bold white]Ultra-Fast 1-Sec Latency & Persistent Background Listener[/bold white]")
         console.print("[dim cyan]Status:[/dim cyan]           [bold green]Online & Ready (Runs continuously until closed)[/bold green]\n")
     except Exception:
