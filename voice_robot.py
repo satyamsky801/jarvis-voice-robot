@@ -63,6 +63,8 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
 
+from llm_engine import JarvisLLMEngine
+
 # Initialize Rich Console with safe fallback
 try:
     console = Console(highlight=False)
@@ -652,6 +654,11 @@ class JarvisTaskEngine:
         self.last_action_time = 0.0
         self.last_action_query = ""
         self.stopwatch_start = None
+        try:
+            self.llm_engine = JarvisLLMEngine()
+        except Exception as e:
+            logger.warning("Could not initialize JarvisLLMEngine: %s", e)
+            self.llm_engine = None
         self.app_map = {
             "chrome": "start chrome",
             "google chrome": "start chrome",
@@ -1348,8 +1355,73 @@ class JarvisTaskEngine:
             return True
 
         # -------------------------------------------------------------
-        # 21. General Knowledge / Q&A (Speaks Answer Directly)
+        # 21. Advanced Human Language Understanding (LLM Powered)
         # -------------------------------------------------------------
+        if self.llm_engine:
+            safe_print(f"🤖 [Thinking with {self.llm_engine.model}...]", "dim cyan")
+            res = self.llm_engine.process_human_language(query)
+
+            # Execute any physical computer action identified by the LLM
+            if res.action:
+                act = res.action.lower().strip()
+                param = res.action_param or ""
+
+                if act in ["search_youtube", "play_youtube"]:
+                    query = param if param else "trending music"
+                    nav_url = f"https://www.youtube.com/results?search_query={urllib.parse.quote_plus(query)}"
+                    navigate_browser_url(nav_url)
+                    self.voice.speak(res.speech or f"Searching {query} on YouTube.")
+                    return True
+                elif act == "open_app":
+                    if param:
+                        self._open_application(param)
+                    return True
+                elif act == "close_app":
+                    if param:
+                        self._close_application(param)
+                    return True
+                elif act == "screenshot":
+                    self._take_screenshot()
+                    return True
+                elif act == "volume_up":
+                    self._adjust_volume(up=True, steps=5)
+                    self.voice.speak("Turned the volume up.")
+                    return True
+                elif act == "volume_down":
+                    self._adjust_volume(up=False, steps=5)
+                    self.voice.speak("Turned the volume down.")
+                    return True
+                elif act == "mute":
+                    user32.keybd_event(VK_VOLUME_MUTE, 0, 0, 0)
+                    user32.keybd_event(VK_VOLUME_MUTE, 0, 2, 0)
+                    self.voice.speak("Muted.")
+                    return True
+                elif act in ["pause_media", "resume_media"]:
+                    send_youtube_hotkey(VK_K)
+                    self.voice.speak("Paused." if act == "pause_media" else "Resumed.")
+                    return True
+                elif act == "next_track":
+                    send_youtube_hotkey(VK_N, shift=True)
+                    self.voice.speak("Skipped to next.")
+                    return True
+                elif act == "previous_track":
+                    send_youtube_hotkey(VK_P, shift=True)
+                    self.voice.speak("Going to previous.")
+                    return True
+                elif act == "open_website":
+                    url = param
+                    if url and not url.startswith("http"):
+                        url = f"https://{url}"
+                    if url:
+                        open_browser_url(url, prefer_chrome=True)
+                        self.voice.speak(res.speech or f"Opening {param}.")
+                    return True
+
+            if res.speech:
+                self.voice.speak(res.speech)
+                return True
+
+        # Fallback to factual knowledge search or conversational response
         answer = self._get_background_knowledge(clean_q) or self._get_background_knowledge(raw_norm)
         if answer:
             self.voice.speak(answer)
@@ -1543,7 +1615,7 @@ class JarvisTaskEngine:
 # ===========================================================================
 # 4. MAIN VOICE ROBOT ASSISTANT RUNNER (PERSISTENT BACKGROUND & FOREGROUND)
 # ===========================================================================
-def display_hud(device_name: str, threshold: float):
+def display_hud(device_name: str, threshold: float, llm_info: str = "Ollama (llama3.2)"):
     """Print holographic Jarvis banner without unsolicited command suggestions."""
     if not console:
         return
@@ -1560,10 +1632,11 @@ def display_hud(device_name: str, threshold: float):
     """
     try:
         console.print(Panel(Text(banner, justify="center", style="bold cyan"), box=ROUNDED, style="cyan"))
+        console.print(f"[dim cyan]AI Model:[/dim cyan]         [bold green]{llm_info} (Human Language Understanding)[/bold green]")
         console.print("[dim cyan]Voice Engine:[/dim cyan]     [bold green]Edge-TTS (Guy Neural - Direct Everyday Tone)[/bold green]")
         console.print(f"[dim cyan]Microphone:[/dim cyan]       [bold green]{device_name} (ACTIVE & UNMUTED 100%)[/bold green]")
         console.print("[dim cyan]Browser Engine:[/dim cyan]   [bold green]Google Chrome Integration (Tab Navigation & Control)[/bold green]")
-        console.print("[dim cyan]Mode:[/dim cyan]             [bold white]Ultra-Fast 1-Sec Latency & Everyday Assistant[/bold white]")
+        console.print("[dim cyan]Mode:[/dim cyan]             [bold white]Hybrid Ultra-Fast & Advanced LLM Intelligence[/bold white]")
         console.print("[dim cyan]Status:[/dim cyan]           [bold green]Online & Ready (Runs continuously until closed)[/bold green]\n")
     except Exception:
         pass
@@ -1580,7 +1653,8 @@ def main():
     engine = JarvisTaskEngine(voice)
 
     ear.calibrate(duration_sec=0.3)
-    display_hud(ear.device_name, ear.speech_threshold)
+    llm_info = f"{engine.llm_engine.provider.capitalize()} ({engine.llm_engine.model})" if engine.llm_engine else "Local Fast Path"
+    display_hud(ear.device_name, ear.speech_threshold, llm_info)
 
     voice.speak("Hey, I'm online and listening. What do you need?")
 
