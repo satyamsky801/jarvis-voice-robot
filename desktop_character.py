@@ -2,6 +2,12 @@
 JARVIS Desktop Mascot Companion
 An interactive, animated 3D robot character that floats on your Windows desktop,
 reacts in real-time to voice commands, LLM thinking, speech, and PC task execution.
+
+Includes:
+- Lifelike zero-g floating physics, horizontal swaying, and dynamic rotational tilting
+- 125 BPM animated dancing routine with alternating steps & floating musical notes
+- Thumbs-up approval gesture and golden sparkles
+- Remorseful kneeling-down apology pose when JARVIS cannot answer a question
 """
 
 from __future__ import annotations
@@ -11,6 +17,7 @@ import logging
 import math
 import os
 import queue
+import random
 import threading
 import time
 import tkinter as tk
@@ -56,8 +63,8 @@ class JarvisDesktopMascot:
         self.root.attributes("-transparentcolor", TRANSPARENT_COLOR)
         self.root.config(bg=TRANSPARENT_COLOR)
 
-        # Mascot state
-        self.state = "idle"  # idle, blink, listen, think, speak, action
+        # Mascot state: idle, blink, listen, think, speak, action, thumbsup, kneedown, dance
+        self.state = "idle"
         self.current_size = "medium"
         self.bubble_text = ""
         self.bubble_title = ""
@@ -70,13 +77,19 @@ class JarvisDesktopMascot:
         self.drag_start_y = 0
         self.has_moved = False
 
-        # Animation timing
+        # Animation timing & state timeouts
         self.anim_frame = 0
         self.last_blink_time = time.time()
         self.blink_duration = 0.2
         self.is_blinking = False
         self.action_reset_time = 0.0
+        self.thumbsup_reset_time = 0.0
+        self.kneedown_reset_time = 0.0
+        self.dance_reset_time = 0.0
         self.speech_talk_cycle = 0
+
+        # Floating musical note particles for dancing state
+        self.particles = []
 
         # Communication queue
         self.event_queue = queue.Queue()
@@ -94,7 +107,7 @@ class JarvisDesktopMascot:
         self._load_images()
         self._bind_events()
 
-        # Start animation and event loop
+        # Start animation and event loops
         self.root.after(30, self._animation_loop)
         self.root.after(25, self._poll_queue)
 
@@ -151,10 +164,17 @@ class JarvisDesktopMascot:
         self.canvas.pack(fill="both", expand=True)
 
     def _load_images(self):
-        """Pre-cache resized images for fast rendering."""
+        """Pre-cache resized images and rotation buffers for fast rendering."""
         target_size = SIZES[self.current_size]
-        self.images = {}
-        for state_name in ["idle", "blink", "listen", "think", "speak", "action"]:
+        self.raw_images = {}
+        self.rotated_cache = {}
+
+        all_states = [
+            "idle", "blink", "listen", "think", "speak",
+            "action", "thumbsup", "kneedown", "dance_1", "dance_2"
+        ]
+
+        for state_name in all_states:
             img_path = ASSETS_DIR / f"mascot_{state_name}.png"
             if not img_path.exists():
                 img_path = ASSETS_DIR / "mascot_idle.png"
@@ -162,13 +182,41 @@ class JarvisDesktopMascot:
             try:
                 raw_img = Image.open(img_path).convert("RGBA")
                 resized = raw_img.resize(target_size, Image.Resampling.LANCZOS)
-
-                # Composite onto transparent key color so borders are smooth
-                bg = Image.new("RGBA", resized.size, (1, 1, 1, 255))
-                comp = Image.alpha_composite(bg, resized)
-                self.images[state_name] = ImageTk.PhotoImage(comp)
+                self.raw_images[state_name] = resized
             except Exception as e:
                 logger.error("Failed to load mascot image %s: %s", state_name, e)
+
+    def _get_rendered_image(self, state_name: str, tilt_angle: float) -> Optional[ImageTk.PhotoImage]:
+        """Get or compute rotated PhotoImage from memory cache."""
+        # Quantize angle to nearest 0.5 degrees for buttery performance
+        q_angle = round(tilt_angle * 2.0) / 2.0
+        key = (state_name, q_angle)
+        if key in self.rotated_cache:
+            return self.rotated_cache[key]
+
+        raw = self.raw_images.get(state_name) or self.raw_images.get("idle")
+        if not raw:
+            return None
+
+        try:
+            if abs(q_angle) < 0.2:
+                rotated = raw
+            else:
+                rotated = raw.rotate(-q_angle, resample=Image.Resampling.BICUBIC, expand=False)
+
+            bg = Image.new("RGBA", rotated.size, (1, 1, 1, 255))
+            comp = Image.alpha_composite(bg, rotated)
+            photo = ImageTk.PhotoImage(comp)
+
+            # Keep cache bounded to save RAM
+            if len(self.rotated_cache) > 100:
+                self.rotated_cache.clear()
+
+            self.rotated_cache[key] = photo
+            return photo
+        except Exception as e:
+            logger.error("Rotation error: %s", e)
+            return None
 
     def _bind_events(self):
         """Bind mouse drag, clicks, and context menu."""
@@ -209,6 +257,12 @@ class JarvisDesktopMascot:
         menu = tk.Menu(self.root, tearoff=0, bg="#1a1d24", fg="#ffffff", activebackground="#00d4ff", activeforeground="#000000", font=("Segoe UI", 10))
         menu.add_command(label="🎙️ Listen Now", command=self._trigger_listen_menu)
         menu.add_command(label="💬 Type Command...", command=self._open_type_dialog)
+        menu.add_separator()
+
+        # Fun animations sub-actions
+        menu.add_command(label="💃 Dance!", command=lambda: self.dance(6.0))
+        menu.add_command(label="👍 Thumbs Up", command=lambda: self.thumbs_up(3.0))
+        menu.add_command(label="🙇 Kneel Down (Sorry)", command=lambda: self.kneel_down(4.0))
         menu.add_separator()
 
         size_menu = tk.Menu(menu, tearoff=0, bg="#1a1d24", fg="#ffffff", activebackground="#00d4ff", activeforeground="#000000")
@@ -260,7 +314,6 @@ class JarvisDesktopMascot:
         dialog.config(bg="#12151c")
         dialog.resizable(False, False)
 
-        # Center near mascot
         mx = self.root.winfo_x() - 100
         my = self.root.winfo_y() + 50
         dialog.geometry(f"340x95+{max(50, mx)}+{max(50, my)}")
@@ -276,7 +329,7 @@ class JarvisDesktopMascot:
             txt = entry.get().strip()
             if txt:
                 dialog.destroy()
-                self.show_speech(f"Thinking: \"{txt}\"", title="COMMAND", duration=3.0)
+                self.show_speech(f'Thinking: "{txt}"', title="COMMAND", duration=3.0)
                 if self.on_typed_command:
                     threading.Thread(target=self.on_typed_command, args=(txt,), daemon=True).start()
 
@@ -306,6 +359,18 @@ class JarvisDesktopMascot:
         """Display speech bubble above mascot."""
         self.event_queue.put(("SHOW_SPEECH", text, title, duration))
 
+    def dance(self, duration: float = 6.5, text: str = "Check out these moves! 🕺🎶"):
+        """Trigger animated dancing groove routine."""
+        self.set_state("dance", text=text, title="DANCE", duration=duration)
+
+    def thumbs_up(self, duration: float = 3.0, text: str = "Nice! 👍"):
+        """Trigger thumbs-up approval gesture."""
+        self.set_state("thumbsup", text=text, title="NICE!", duration=duration)
+
+    def kneel_down(self, duration: float = 4.0, text: str = "I apologize! 🙇"):
+        """Trigger remorseful kneeling-down apology pose."""
+        self.set_state("kneedown", text=text, title="SORRY", duration=duration)
+
     def _poll_queue(self):
         """Handle incoming state events from background engine threads."""
         while not self.event_queue.empty():
@@ -316,12 +381,20 @@ class JarvisDesktopMascot:
                 if cmd == "SET_STATE":
                     _, new_state, text, title, duration = evt
                     self.state = new_state
+                    now = time.time()
                     if text:
                         self.bubble_text = text
                         self.bubble_title = title
-                        self.bubble_expire_time = time.time() + duration
+                        self.bubble_expire_time = now + duration
+
                     if new_state == "action":
-                        self.action_reset_time = time.time() + 2.5
+                        self.action_reset_time = now + 2.5
+                    elif new_state == "thumbsup":
+                        self.thumbsup_reset_time = now + duration
+                    elif new_state == "kneedown":
+                        self.kneedown_reset_time = now + duration
+                    elif new_state == "dance":
+                        self.dance_reset_time = now + duration
 
                 elif cmd == "SHOW_SPEECH":
                     _, text, title, duration = evt
@@ -335,21 +408,62 @@ class JarvisDesktopMascot:
         if self.is_running:
             self.root.after(25, self._poll_queue)
 
+    def _spawn_dance_particle(self):
+        """Spawn a floating musical note or sparkle particle above dancing mascot."""
+        notes = ["♪", "♫", "♬", "✨", "★"]
+        colors = ["#00d4ff", "#ec4899", "#a855f7", "#fbbf24", "#38bdf8"]
+        char_h = SIZES[self.current_size][1]
+        self.particles.append({
+            "x": self.char_x + random.randint(-40, 40),
+            "y": self.char_y - char_h // 2 + random.randint(-10, 20),
+            "vx": random.uniform(-0.8, 0.8),
+            "vy": random.uniform(-2.5, -1.2),
+            "char": random.choice(notes),
+            "color": random.choice(colors),
+            "life": 28,
+            "max_life": 28,
+        })
+
     def _animation_loop(self):
-        """Continuous render loop: floating physics, blinking, speech bubbles."""
+        """Continuous render loop: enhanced movement physics, dancing routine, blinking, speech bubbles."""
         if not self.is_running:
             return
 
         now = time.time()
         self.anim_frame += 1
 
-        # 1. Action state timeout
+        # 1. State timeouts
         if self.state == "action" and now > self.action_reset_time:
             self.state = "idle"
+        elif self.state == "thumbsup" and now > self.thumbsup_reset_time:
+            self.state = "idle"
+        elif self.state == "kneedown" and now > self.kneedown_reset_time:
+            self.state = "idle"
+        elif self.state == "dance" and now > self.dance_reset_time:
+            self.state = "idle"
 
-        # 2. Random natural blinking in idle state
+        # 2. Base dynamics & offsets
+        x_offset = 0.0
+        y_offset = 0.0
+        tilt_deg = 0.0
         active_state = self.state
+
+        # 3. Dynamic Motion Physics per State
         if self.state == "idle":
+            # Multi-harmonic organic floating (zero-g astronaut buoyancy)
+            y_offset = math.sin(now * 2.4) * 5.5 + math.sin(now * 1.2) * 2.0
+            # Gentle horizontal organic sway
+            x_offset = math.sin(now * 1.5) * 4.0
+            # Gentle rotational breathing tilt
+            tilt_deg = math.sin(now * 1.5) * 2.2
+
+            # Spontaneous idle curiosity quirk (small head perk every ~14s)
+            quirk_cycle = (now % 14.0)
+            if quirk_cycle < 1.2:
+                tilt_deg += math.sin(quirk_cycle * math.pi / 1.2) * 4.0
+                y_offset -= math.sin(quirk_cycle * math.pi / 1.2) * 3.0
+
+            # Natural periodic blinking
             if self.is_blinking:
                 if now - self.last_blink_time > self.blink_duration:
                     self.is_blinking = False
@@ -361,26 +475,94 @@ class JarvisDesktopMascot:
                 self.last_blink_time = now
                 active_state = "blink"
 
-        # 3. Speaking mouth animation cycle
-        if self.state == "speak":
+        elif self.state == "listen":
+            # Attentive forward lean toward user
+            x_offset = math.sin(now * 2.0) * 2.0
+            y_offset = -4.0 + math.sin(now * 3.0) * 3.0
+            tilt_deg = -2.5
+
+        elif self.state == "think":
+            # Contemplative float higher with gentle orbital drift
+            y_offset = -10.0 + math.sin(now * 1.8) * 4.0
+            x_offset = math.cos(now * 1.8) * 3.5
+            tilt_deg = math.sin(now * 1.8) * 2.0
+
+        elif self.state == "speak":
+            # Speaking mouth animation cycle
             self.speech_talk_cycle = (self.speech_talk_cycle + 1) % 12
             active_state = "speak" if self.speech_talk_cycle < 7 else "idle"
+            # Energetic speech rhythm
+            y_offset = math.sin(now * 7.0) * 3.5
+            x_offset = math.sin(now * 3.5) * 2.0
+            tilt_deg = math.sin(now * 3.5) * 2.5
 
-        # 4. Floating vertical bob physics: y = y_base + sin(t) * 5
-        bob_offset = int(math.sin(now * 2.6) * 5.0)
-        render_y = self.char_y + bob_offset
+        elif self.state == "action":
+            # Celebratory star hop
+            jump_t = max(0.0, min(1.0, (self.action_reset_time - now) / 2.5))
+            y_offset = -math.sin(jump_t * math.pi * 3) * 12.0
+            tilt_deg = math.sin(jump_t * math.pi * 4) * 4.0
 
-        # 5. Clear and render canvas
+        elif self.state == "thumbsup":
+            # Upward pop bounce with confident star wink
+            pop_t = max(0.0, min(1.0, (self.thumbsup_reset_time - now) / 3.0))
+            y_offset = -math.sin(pop_t * math.pi * 2) * 10.0 - 4.0
+            tilt_deg = 2.0
+
+        elif self.state == "kneedown":
+            # Physically drops down onto knees with humble sorrow quiver
+            y_offset = 24.0
+            x_offset = math.sin(now * 16.0) * 1.5
+            tilt_deg = math.sin(now * 2.0) * 1.0
+
+        elif self.state == "dance":
+            # 125 BPM animated dancing groove routine!
+            dance_freq = 7.5
+            # Side-to-side shuffle steps
+            x_offset = math.sin(now * dance_freq) * 18.0
+            # Bouncy jumps on beats
+            y_offset = -abs(math.cos(now * dance_freq)) * 16.0
+            # Rhythm tilt back and forth
+            tilt_deg = math.sin(now * dance_freq) * 7.5
+            # Alternate frames dance_1 and dance_2 on beat
+            active_state = "dance_1" if math.sin(now * dance_freq) >= 0 else "dance_2"
+
+            # Spawn floating musical notes
+            if self.anim_frame % 5 == 0:
+                self._spawn_dance_particle()
+
+        # 4. Clear canvas and render
         self.canvas.delete("all")
+        render_x = int(self.char_x + x_offset)
+        render_y = int(self.char_y + y_offset)
 
-        # Render active image
-        img = self.images.get(active_state, self.images.get("idle"))
+        # Draw Mascot Image (with cached rotation)
+        img = self._get_rendered_image(active_state, tilt_deg)
         if img:
-            self.canvas.create_image(self.char_x, render_y, image=img, anchor="center")
+            self.canvas.create_image(render_x, render_y, image=img, anchor="center")
+
+        # Update and render dancing note particles
+        if self.particles:
+            alive_particles = []
+            for p in self.particles:
+                p["x"] += p["vx"]
+                p["y"] += p["vy"]
+                p["life"] -= 1
+                if p["life"] > 0:
+                    fsize = max(8, int(13 * (p["life"] / p["max_life"])))
+                    self.canvas.create_text(
+                        int(p["x"]), int(p["y"]),
+                        text=p["char"],
+                        fill=p["color"],
+                        font=("Segoe UI Symbol", fsize, "bold"),
+                        anchor="center"
+                    )
+                    alive_particles.append(p)
+            self.particles = alive_particles
 
         # Render speech bubble if active
         if self.bubble_text and now < self.bubble_expire_time:
-            self._render_speech_bubble(self.char_x, render_y - SIZES[self.current_size][1] // 2 - 12)
+            char_h = SIZES[self.current_size][1]
+            self._render_speech_bubble(render_x, render_y - char_h // 2 - 12)
 
         self.root.after(33, self._animation_loop)
 
@@ -403,7 +585,6 @@ class JarvisDesktopMascot:
         if cur_line:
             lines.append(" ".join(cur_line))
 
-        # Max 4 lines shown in bubble
         if len(lines) > 4:
             lines = lines[:4]
             lines[3] += "..."
@@ -414,18 +595,31 @@ class JarvisDesktopMascot:
         bubble_w = min(self.canvas_w - 20, max(140, max(len(l) for l in lines) * 7 + 30))
         bubble_h = max(38, num_lines * 16 + 22)
 
-        # Bubble coordinates (clamped inside canvas)
-        bx1 = max(10, self.char_x - bubble_w // 2)
+        bx1 = max(10, anchor_x - bubble_w // 2)
         bx2 = bx1 + bubble_w
         by2 = max(45, anchor_y)
         by1 = max(8, by2 - bubble_h)
 
-        # Border color based on state
-        border_col = "#00d4ff" if self.state == "listen" else ("#a855f7" if self.state == "think" else ("#10b981" if self.state == "action" else "#38bdf8"))
-        bg_col = "#0d1117"
+        # Border color based on visual state
+        if self.state == "listen":
+            border_col = "#00d4ff"
+        elif self.state == "think":
+            border_col = "#a855f7"
+        elif self.state == "action":
+            border_col = "#10b981"
+        elif self.state == "thumbsup":
+            border_col = "#f59e0b"
+        elif self.state == "kneedown":
+            border_col = "#38bdf8"
+        elif self.state == "dance":
+            border_col = "#ec4899"
+        else:
+            border_col = "#38bdf8"
 
-        # Draw rounded bubble container
+        bg_col = "#0d1117"
         r = 10
+
+        # Draw rounded bubble polygon
         self.canvas.create_polygon(
             bx1 + r, by1, bx2 - r, by1, bx2, by1, bx2, by1 + r,
             bx2, by2 - r, bx2, by2, bx2 - r, by2, bx1 + r, by2,
@@ -433,14 +627,14 @@ class JarvisDesktopMascot:
             smooth=True, fill=bg_col, outline=border_col, width=2
         )
 
-        # Little pointer tail pointing to the robot head
-        tail_x = self.char_x
+        # Pointer tail pointing towards the robot head
+        tail_x = anchor_x
         self.canvas.create_polygon(
             tail_x - 7, by2 - 1, tail_x + 7, by2 - 1, tail_x, by2 + 8,
             fill=bg_col, outline=border_col, width=1
         )
 
-        # Optional Title (e.g. LISTENING, COMMAND)
+        # Optional Title (e.g. LISTENING, DANCE, NICE, SORRY)
         if self.bubble_title:
             self.canvas.create_text(
                 (bx1 + bx2) // 2, by1 + 10,
@@ -453,7 +647,7 @@ class JarvisDesktopMascot:
         else:
             text_y = (by1 + by2) // 2
 
-        # Spoken / Recognized text
+        # Text inside bubble
         self.canvas.create_text(
             (bx1 + bx2) // 2, text_y,
             text=bubble_text,

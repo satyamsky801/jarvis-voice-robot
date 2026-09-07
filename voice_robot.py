@@ -870,6 +870,44 @@ class JarvisTaskEngine:
             return True
 
         # -------------------------------------------------------------
+        # 2b. Dancing Mascot Commands ("dance", "dancing step")
+        # -------------------------------------------------------------
+        if any(w in clean_q for w in [
+            "dance", "do a dance", "dance for me", "start dancing",
+            "dancing step", "dance step", "show me your dance",
+            "can you dance", "dance move", "let's dance", "lets dance"
+        ]):
+            if self.mascot:
+                self.mascot.set_state("dance", text="Check out these moves! 🕺🎶", title="DANCE", duration=6.5)
+            self.voice.speak("Check out these moves! Turning up the groove.")
+            return True
+
+        # -------------------------------------------------------------
+        # 2c. Thumbs Up Commands ("thumbs up", "good job", "thanks")
+        # -------------------------------------------------------------
+        if any(w in clean_q for w in [
+            "thumbs up", "thumsup", "thumb up", "give me a thumbs up",
+            "good job", "nice job", "well done", "nice work",
+            "awesome", "great job", "thank you", "thanks jarvis"
+        ]):
+            if self.mascot:
+                self.mascot.set_state("thumbsup", text="Appreciate it! 👍", title="NICE!", duration=3.0)
+            self.voice.speak("Appreciate that. Glad I could help.")
+            return True
+
+        # -------------------------------------------------------------
+        # 2d. Kneel Down / Apology Commands ("kneel down", "knee down")
+        # -------------------------------------------------------------
+        if any(w in clean_q for w in [
+            "kneel down", "knee down", "say sorry", "apologize",
+            "down on your knees", "kneel", "bow down"
+        ]):
+            if self.mascot:
+                self.mascot.set_state("kneedown", text="I apologize! 🙇", title="SORRY", duration=4.5)
+            self.voice.speak("My bad, I apologize.")
+            return True
+
+        # -------------------------------------------------------------
         # 3. YouTube Video In-Page Controls (Playback, Quality, Captions, Next)
         # -------------------------------------------------------------
         if any(w in clean_q for w in ["pause video", "pause the video", "resume video", "resume the video", "pause", "resume", "stop video"]):
@@ -977,6 +1015,12 @@ class JarvisTaskEngine:
                         break
 
             if search_query:
+                is_music = any(m in search_query.lower() for m in ["song", "music", "lofi", "beats", "track", "remix", "dance"])
+                if is_music and self.mascot:
+                    self.mascot.set_state("dance", text=f"Grooving to: {search_query} 🎶", title="PARTY", duration=6.0)
+                elif self.mascot:
+                    self.mascot.set_state("action", text=f"YouTube: {search_query} 🎵", title="ACTION", duration=3.0)
+
                 url = f"https://www.youtube.com/results?search_query={urllib.parse.quote_plus(search_query)}"
                 navigate_browser_url(url)
                 self.voice.speak(f"Searching YouTube for {search_query}.")
@@ -1460,6 +1504,19 @@ class JarvisTaskEngine:
                     return True
 
             if res.speech:
+                # Detect if the assistant cannot answer the question -> triggers kneel-down apology pose
+                unknown_phrases = [
+                    "i don't know", "i do not know", "i'm not sure", "i am not sure",
+                    "i couldn't find", "i cannot find", "i don't have information",
+                    "i do not have information", "i'm unable to answer", "i cannot answer",
+                    "not enough information", "i don't have access to", "no idea",
+                    "i apologize, but i don't", "i'm sorry, but i don't", "can't help with that",
+                    "outside my knowledge"
+                ]
+                sp_lower = res.speech.lower()
+                if any(p in sp_lower for p in unknown_phrases):
+                    if self.mascot:
+                        self.mascot.set_state("kneedown", text=res.speech, title="APOLOGY", duration=4.5)
                 self.voice.speak(res.speech)
                 return True
 
@@ -1469,8 +1526,10 @@ class JarvisTaskEngine:
             self.voice.speak(answer)
             return True
 
-        # Fallback conversational response
-        self.voice.speak("Got it. I'm right here listening.")
+        # When completely unable to answer or resolve query -> kneel down apologetically
+        if self.mascot:
+            self.mascot.set_state("kneedown", text="I don't have the answer to that... 🙇", title="APOLOGY", duration=4.5)
+        self.voice.speak("Sorry, I don't have an answer to that one.")
         return True
 
     def _evaluate_math(self, query: str) -> Optional[str]:
