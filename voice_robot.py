@@ -4,8 +4,11 @@ Inspired by Tony Stark's J.A.R.V.I.S.
 
 Features:
 - Pure Voice Input & Output (Speaks and listens naturally like a robot)
+- Dynamic Microphone Sensitivity (Auto-calibrating ambient noise)
+- Audio Normalization (Boosts quiet laptop microphone levels for Google STT)
 - British Ryan Neural Voice via Edge-TTS (100% Free, High Quality)
 - Non-blocking Callback Audio Stream (Supports Windows WDM-KS, MME, DirectSound, WASAPI)
+- Dual Input: Voice Listening + Instant Keyboard Typing
 - Direct Task Execution:
   * Application launching and closing (Chrome, Notepad, Calc, Code, etc.)
   * Web searches & YouTube playback
@@ -32,6 +35,7 @@ import ctypes
 import datetime
 import json
 import logging
+import msvcrt
 import os
 import platform
 import queue
@@ -152,7 +156,8 @@ class JarvisEar:
         device_info = sd.query_devices(self.input_device)
         self.sample_rate = int(device_info.get("default_samplerate", 44100))
         self.channels = min(2, max(1, device_info.get("max_input_channels", 1)))
-        self.speech_threshold = 0.008  # Default sensitive threshold
+        self.speech_threshold = 0.0015  # Default sensitive threshold
+        self.ambient_rms = 0.0005
 
     def _find_best_input_device(self) -> Tuple[int, str]:
         """Find the working microphone input device, prioritizing Microphone Array."""
@@ -177,12 +182,40 @@ class JarvisEar:
             if d.get("max_input_channels", 0) > 0:
                 return i, d.get("name", "")
 
-        return 11, "Default Realtek Microphone"
+        return 11, "Microphone Array"
 
-    def record_phrase(self, max_duration_sec: float = 6.0, silence_cutoff: float = 1.4) -> Optional[sr.AudioData]:
+    def calibrate(self, duration_sec: float = 0.4):
+        """Calibrate ambient background noise level to set dynamic sensitivity threshold."""
+        audio_q = queue.Queue()
+
+        def callback(indata, frames, time_info, status):
+            audio_q.put(indata.copy())
+
+        try:
+            with sd.InputStream(
+                device=self.input_device,
+                channels=self.channels,
+                samplerate=self.sample_rate,
+                dtype="float32",
+                callback=callback,
+            ):
+                time.sleep(duration_sec)
+
+            chunks = [audio_q.get() for _ in range(audio_q.qsize())]
+            if chunks:
+                all_audio = np.concatenate(chunks, axis=0)
+                rms = float(np.sqrt(np.mean(np.square(all_audio))))
+                self.ambient_rms = rms
+                # Sensitive threshold: 1.4x ambient, with safe bounds
+                self.speech_threshold = max(0.0008, min(0.012, self.ambient_rms * 1.4))
+        except Exception:
+            self.speech_threshold = 0.0015
+
+    def record_phrase(self, max_duration_sec: float = 6.0, silence_cutoff: float = 1.2) -> Tuple[Optional[sr.AudioData], Optional[str]]:
         """
         Record speech using non-blocking asynchronous audio callback queue.
-        Works seamlessly across Windows WDM-KS, MME, DirectSound, and WASAPI without blocking errors.
+        Also checks for keyboard typing simultaneously.
+        Returns (AudioData, typed_text).
         """
         audio_q = queue.Queue()
 
@@ -199,34 +232,51 @@ class JarvisEar:
                 blocksize=int(self.sample_rate * 0.05),  # 50ms chunks
             )
         except Exception as e:
-            console.print(f"[dim red](Audio device open error: {e})[/dim red]")
-            return None
+            console.print(f"[dim red](Audio device notice: {e})[/dim red]")
+            return None, None
 
         recorded_chunks = []
         speech_started = False
         silence_time = 0.0
         start_time = time.time()
+        typed_chars = []
 
         with stream:
             while (time.time() - start_time) < max_duration_sec:
+                # Check if user is typing on keyboard
+                if msvcrt.kbhit():
+                    ch = msvcrt.getwche()
+                    if ch in ('\r', '\n'):
+                        print()
+                        typed = "".join(typed_chars).strip()
+                        if typed:
+                            return None, typed
+                    elif ch == '\b':  # Backspace
+                        if typed_chars:
+                            typed_chars.pop()
+                    else:
+                        typed_chars.append(ch)
+
                 try:
-                    chunk = audio_q.get(timeout=0.1)
+                    chunk = audio_q.get(timeout=0.05)
                 except queue.Empty:
                     continue
 
                 chunk_dur = len(chunk) / self.sample_rate
-                rms = np.sqrt(np.mean(np.square(chunk)))
+                rms = float(np.sqrt(np.mean(np.square(chunk))))
 
                 # Detect speech activity
                 if rms > self.speech_threshold:
-                    speech_started = True
+                    if not speech_started:
+                        speech_started = True
+                        console.print("[bold cyan]🎙️ [Hearing voice... Speak now][/bold cyan]")
                     silence_time = 0.0
                     recorded_chunks.append(chunk)
                 elif speech_started:
                     silence_time += chunk_dur
                     recorded_chunks.append(chunk)
-                    # Stop if user paused speaking
                     if silence_time >= silence_cutoff:
+                        # User stopped speaking
                         break
                 else:
                     # Pre-speech rolling buffer (keep 0.3s)
@@ -235,8 +285,14 @@ class JarvisEar:
                     if len(recorded_chunks) > max_pre:
                         recorded_chunks.pop(0)
 
+        # If user typed something and pressed enter afterwards
+        if typed_chars:
+            typed = "".join(typed_chars).strip()
+            if typed:
+                return None, typed
+
         if not speech_started or not recorded_chunks:
-            return None
+            return None, None
 
         # Concatenate audio chunks
         full_audio = np.concatenate(recorded_chunks, axis=0)
@@ -251,24 +307,35 @@ class JarvisEar:
         target_samples = int(len(full_audio) * 16000 / self.sample_rate)
         resampled = scipy.signal.resample(full_audio, target_samples)
 
+        # Boost & Normalize audio peak to 0.8 for loud, clear recognition
+        peak = float(np.max(np.abs(resampled)))
+        if peak > 0.0001:
+            resampled = resampled * (0.8 / peak)
+
         # Convert to 16-bit PCM bytes
         pcm16 = (np.clip(resampled, -1.0, 1.0) * 32767).astype(np.int16).tobytes()
 
-        return sr.AudioData(pcm16, 16000, 2)
+        return sr.AudioData(pcm16, 16000, 2), None
 
     def listen(self, timeout_sec: float = 6.0) -> str:
-        """Listen to the microphone and transcribe spoken words."""
-        audio_data = self.record_phrase(max_duration_sec=timeout_sec)
+        """Listen to the microphone and transcribe spoken words, or return typed text."""
+        audio_data, typed_text = self.record_phrase(max_duration_sec=timeout_sec)
+
+        if typed_text:
+            return typed_text
+
         if not audio_data:
             return ""
 
         try:
+            console.print("[bold yellow]⚡ [Processing speech...][/bold yellow]")
             text = self.recognizer.recognize_google(audio_data)
             return text.strip()
         except sr.UnknownValueError:
+            console.print("[dim yellow](Audio detected but not understood clearly, try speaking closer or typing)[/dim yellow]")
             return ""
         except sr.RequestError as e:
-            console.print(f"[dim red](Speech API network error: {e})[/dim red]")
+            console.print(f"[dim red](Google Speech API offline/network error: {e})[/dim red]")
             return ""
         except Exception:
             return ""
@@ -604,7 +671,7 @@ class JarvisTaskEngine:
 # ===========================================================================
 # 4. MAIN VOICE ROBOT ASSISTANT RUNNER
 # ===========================================================================
-def display_hud(device_name: str):
+def display_hud(device_name: str, threshold: float):
     """Print holographic Jarvis banner."""
     try:
         console.clear()
@@ -619,9 +686,9 @@ def display_hud(device_name: str):
     """
     try:
         console.print(Panel(Text(banner, justify="center", style="bold cyan"), box=ROUNDED, style="cyan"))
-        console.print("[dim cyan]Voice Engine:[/dim cyan] [bold green]Edge-TTS (British J.A.R.V.I.S. Ryan Neural)[/bold green]")
-        console.print(f"[dim cyan]Microphone:[/dim cyan]   [bold green]{device_name}[/bold green]")
-        console.print("[dim cyan]Status:[/dim cyan]       [bold white]Voice Loop Active[/bold white]")
+        console.print("[dim cyan]Voice Engine:[/dim cyan]     [bold green]Edge-TTS (British J.A.R.V.I.S. Ryan Neural)[/bold green]")
+        console.print(f"[dim cyan]Microphone:[/dim cyan]       [bold green]{device_name}[/bold green] (Sensitivity: {threshold:.5f})")
+        console.print("[dim cyan]Input Controls:[/dim cyan]   [bold white]Speak into mic OR type command anytime[/bold white]")
         console.print("[dim cyan]Voice Commands:[/dim cyan]")
         console.print("  * [italic yellow]'open chrome'[/italic yellow], [italic yellow]'open notepad'[/italic yellow], [italic yellow]'open calculator'[/italic yellow], [italic yellow]'open code'[/italic yellow]")
         console.print("  * [italic yellow]'system status'[/italic yellow] or [italic yellow]'diagnostics'[/italic yellow] (CPU, RAM, Battery)")
@@ -641,7 +708,11 @@ def main():
     ear = JarvisEar()
     engine = JarvisTaskEngine(voice)
 
-    display_hud(ear.device_name)
+    # Initial microphone calibration
+    console.print("[dim cyan]Calibrating microphone sensitivity...[/dim cyan]")
+    ear.calibrate(duration_sec=0.3)
+
+    display_hud(ear.device_name, ear.speech_threshold)
 
     # Initial Greeting
     voice.speak("All systems initialized. J.A.R.V.I.S. voice protocol active. I am at your command, sir.")
@@ -650,9 +721,9 @@ def main():
     while running:
         try:
             try:
-                console.print("[bold green]● [LISTENING...][/bold green] [dim white](Speak your command aloud)[/dim white]")
+                console.print("\n[bold green]● [LISTENING...][/bold green] [dim white](Speak or type command)[/dim white]")
             except Exception:
-                print("[LISTENING...] (Speak your command aloud)")
+                print("\n[LISTENING...] (Speak or type command)")
 
             recognized_text = ear.listen(timeout_sec=5.0)
 
