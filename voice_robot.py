@@ -158,30 +158,115 @@ def set_clipboard(text: str) -> bool:
         user32.CloseClipboard()
 
 
-def find_browser_window():
-    """Find visible Chrome or Edge browser window handle."""
-    target_hwnd = None
+# Session logging
+SESSION_LOG_FILE = Path("logs/jarvis_session.log")
+SESSION_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+
+def log_session_event(event_type: str, details: str):
+    """Record timestamped event to logs/jarvis_session.log."""
+    try:
+        ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with open(SESSION_LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(f"[{ts}] [{event_type}] {details}\n")
+    except Exception:
+        pass
+
+
+def bring_window_to_foreground(hwnd: int) -> bool:
+    """Reliably restore window and bring it to foreground with keyboard focus."""
+    try:
+        if user32.IsIconic(hwnd):
+            user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+        else:
+            user32.ShowWindow(hwnd, 5)  # SW_SHOW
+
+        # Press Alt to bypass Windows foreground lock restriction across background processes
+        user32.keybd_event(VK_MENU, 0, 0, 0)
+        user32.keybd_event(VK_MENU, 0, 2, 0)
+
+        user32.BringWindowToTop(hwnd)
+        user32.SetForegroundWindow(hwnd)
+        user32.SetFocus(hwnd)
+        return True
+    except Exception:
+        return False
+
+
+def find_browser_window(prefer_youtube: bool = False) -> Optional[int]:
+    """
+    Find visible Chrome or Edge browser window handle.
+    Prioritizes Google Chrome over Microsoft Edge.
+    Prioritizes YouTube window when prefer_youtube is True.
+    """
+    chrome_wins = []
+    other_wins = []
 
     def enum_cb(hwnd, lparam):
-        nonlocal target_hwnd
         if user32.IsWindowVisible(hwnd):
             length = user32.GetWindowTextLengthW(hwnd)
             if length > 0:
                 buff = ctypes.create_unicode_buffer(length + 1)
                 user32.GetWindowTextW(hwnd, buff, length + 1)
                 title = buff.value.lower()
-                if ('youtube' in title or 'chrome' in title or 'edge' in title) and not ('visual studio' in title or 'antigravity' in title):
-                    target_hwnd = hwnd
-                    return False
+                if not any(ign in title for ign in ["visual studio", "antigravity", "cursor", "sublime"]):
+                    pid = wintypes.DWORD()
+                    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                    pname = ""
+                    try:
+                        pname = psutil.Process(pid.value).name().lower()
+                    except Exception:
+                        pass
+
+                    if "chrome" in pname or "chrome" in title:
+                        chrome_wins.append((hwnd, title))
+                    elif "edge" in pname or "msedge" in pname or "edge" in title or "youtube" in title:
+                        other_wins.append((hwnd, title))
         return True
 
     WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
     user32.EnumWindows(WNDENUMPROC(enum_cb), 0)
-    return target_hwnd
+
+    # 1. Prioritize Google Chrome
+    if chrome_wins:
+        if prefer_youtube:
+            for h, t in chrome_wins:
+                if "youtube" in t:
+                    return h
+        return chrome_wins[0][0]
+
+    # 2. Fall back to other browser if Chrome is not open
+    if other_wins:
+        if prefer_youtube:
+            for h, t in other_wins:
+                if "youtube" in t:
+                    return h
+        return other_wins[0][0]
+
+    return None
+
+
+def send_browser_hotkey(*keys):
+    """Focus browser window and dispatch key combination."""
+    hwnd = find_browser_window(prefer_youtube=False)
+    if hwnd:
+        bring_window_to_foreground(hwnd)
+        time.sleep(0.15)
+    send_hotkey(*keys)
+
+
+def send_youtube_hotkey(*keys):
+    """Focus YouTube window and dispatch key combination."""
+    hwnd = find_browser_window(prefer_youtube=True)
+    if hwnd:
+        bring_window_to_foreground(hwnd)
+        time.sleep(0.15)
+    send_hotkey(*keys)
 
 
 def open_browser_url(url: str, prefer_chrome: bool = True):
     """Open URL in Google Chrome if installed, otherwise default browser."""
+    log_session_event("BROWSER_OPEN", url)
     if prefer_chrome:
         chrome_paths = [
             r"C:\Program Files\Google\Chrome\Application\chrome.exe",
@@ -211,17 +296,17 @@ def navigate_browser_url(url: str):
     Navigate to URL in place if Chrome/YouTube is already open without opening duplicate tabs.
     If no browser is open, launches Chrome.
     """
-    hwnd = find_browser_window()
+    log_session_event("NAVIGATE_URL", url)
+    hwnd = find_browser_window(prefer_youtube=True)
     if hwnd:
         try:
-            user32.ShowWindow(hwnd, 9)  # SW_RESTORE
-            user32.SetForegroundWindow(hwnd)
-            time.sleep(0.12)
+            bring_window_to_foreground(hwnd)
+            time.sleep(0.20)
             set_clipboard(url)
             send_hotkey(VK_CONTROL, VK_L)  # Focus address bar
-            time.sleep(0.06)
+            time.sleep(0.10)
             send_hotkey(VK_CONTROL, VK_V)  # Paste
-            time.sleep(0.06)
+            time.sleep(0.08)
             send_hotkey(VK_RETURN)         # Enter
             return
         except Exception:
@@ -306,6 +391,7 @@ class JarvisVoice:
             return
 
         safe_print(f"[J.A.R.V.I.S.]: {clean_text}", "bold cyan")
+        log_session_event("SPEAK", clean_text)
         self.speech_queue.put(clean_text)
 
     def _speech_worker(self):
@@ -527,7 +613,10 @@ class JarvisEar:
         try:
             safe_print("⚡ [Processing speech...]", "bold yellow")
             text = self.recognizer.recognize_google(audio_data)
-            return text.strip()
+            clean = text.strip()
+            if clean:
+                log_session_event("HEARD", clean)
+            return clean
         except sr.UnknownValueError:
             return ""
         except sr.RequestError as e:
@@ -677,88 +766,106 @@ class JarvisTaskEngine:
             return False
 
         # -------------------------------------------------------------
+        # 1b. Close Microsoft Edge ("close edge")
+        # -------------------------------------------------------------
+        if any(w in clean_q for w in ["close edge", "close msedge", "close microsoft edge", "kill edge", "stop edge"]):
+            for p in psutil.process_iter(['name']):
+                if p.info['name'] and 'msedge' in p.info['name'].lower():
+                    try:
+                        p.kill()
+                    except Exception:
+                        pass
+            self.voice.speak("Microsoft Edge has been closed, sir.")
+            return True
+
+        # -------------------------------------------------------------
         # 2. Browser & Tab Management (Opening & Closing Tabs)
         # -------------------------------------------------------------
         if any(w in clean_q for w in ["close tab", "close this tab", "close current tab"]):
-            send_hotkey(VK_CONTROL, VK_W)
+            send_browser_hotkey(VK_CONTROL, VK_W)
             self.voice.speak("Tab closed, sir.")
             return True
 
         if any(w in clean_q for w in ["close all tabs", "close all windows", "close browser"]):
-            send_hotkey(VK_CONTROL, VK_SHIFT, VK_W)
+            send_browser_hotkey(VK_CONTROL, VK_SHIFT, VK_W)
             self.voice.speak("Browser tabs closed, sir.")
             return True
 
         if any(w in clean_q for w in ["open new tab", "open a new tab", "new tab"]):
-            send_hotkey(VK_CONTROL, VK_T)
+            send_browser_hotkey(VK_CONTROL, VK_T)
             self.voice.speak("New tab opened, sir.")
             return True
 
         if any(w in clean_q for w in ["reopen closed tab", "reopen last closed tab", "reopen last tab", "undo close tab"]):
-            send_hotkey(VK_CONTROL, VK_SHIFT, VK_T)
+            send_browser_hotkey(VK_CONTROL, VK_SHIFT, VK_T)
             self.voice.speak("Reopened last closed tab, sir.")
             return True
 
         if any(w in clean_q for w in ["switch to next tab", "next tab"]):
-            send_hotkey(VK_CONTROL, VK_TAB)
+            send_browser_hotkey(VK_CONTROL, VK_TAB)
             self.voice.speak("Switched to next tab, sir.")
             return True
 
         if any(w in clean_q for w in ["switch to previous tab", "previous tab"]):
-            send_hotkey(VK_CONTROL, VK_SHIFT, VK_TAB)
+            send_browser_hotkey(VK_CONTROL, VK_SHIFT, VK_TAB)
             self.voice.speak("Switched to previous tab, sir.")
             return True
 
         if any(w in clean_q for w in ["bookmark this page", "bookmark page", "bookmark tab"]):
-            send_hotkey(VK_CONTROL, VK_D)
+            send_browser_hotkey(VK_CONTROL, VK_D)
             self.voice.speak("Page bookmarked, sir.")
             return True
 
         if any(w in clean_q for w in ["refresh page", "reload tab", "reload page"]):
-            send_hotkey(VK_CONTROL, VK_R)
+            send_browser_hotkey(VK_CONTROL, VK_R)
             self.voice.speak("Page refreshed, sir.")
             return True
 
         # -------------------------------------------------------------
-        # 3. YouTube Video In-Page Controls (Playback, Captions, Next)
+        # 3. YouTube Video In-Page Controls (Playback, Quality, Captions, Next)
         # -------------------------------------------------------------
         if any(w in clean_q for w in ["pause video", "pause the video", "resume video", "resume the video", "pause", "resume", "stop video"]):
-            send_hotkey(VK_K)
+            send_youtube_hotkey(VK_K)
             self.voice.speak("Video playback toggled, sir.")
             return True
 
         if any(w in clean_q for w in ["mute video", "unmute video"]):
-            send_hotkey(VK_M)
+            send_youtube_hotkey(VK_M)
             self.voice.speak("Video sound toggled, sir.")
             return True
 
         if any(w in clean_q for w in ["full screen", "fullscreen", "exit full screen", "theater mode"]):
-            send_hotkey(VK_F)
+            send_youtube_hotkey(VK_F)
             self.voice.speak("Video display toggled, sir.")
             return True
 
-        if any(w in clean_q for w in ["turn on captions", "turn off captions", "captions", "subtitles"]):
-            send_hotkey(VK_C)
-            self.voice.speak("Captions toggled, sir.")
+        if any(w in clean_q for w in ["turn on captions", "turn off captions", "captions", "subtitles", "enable subtitles in hindi"]):
+            send_youtube_hotkey(VK_C)
+            self.voice.speak("Captions and subtitles toggled, sir.")
+            return True
+
+        if any(w in clean_q for w in ["change video quality to 1080p", "change video quality", "video quality", "quality to 1080p", "1080p"]):
+            send_youtube_hotkey(VK_SHIFT, ord('S'))
+            self.voice.speak("Opening video settings, sir. You can select 1080p from the quality menu.")
             return True
 
         if any(w in clean_q for w in ["next video", "skip video", "play next video"]):
-            send_hotkey(VK_SHIFT, VK_N)
+            send_youtube_hotkey(VK_SHIFT, VK_N)
             self.voice.speak("Playing next video, sir.")
             return True
 
         if any(w in clean_q for w in ["previous video", "play previous video"]):
-            send_hotkey(VK_SHIFT, VK_P)
+            send_youtube_hotkey(VK_SHIFT, VK_P)
             self.voice.speak("Playing previous video, sir.")
             return True
 
         if any(w in clean_q for w in ["forward 10 seconds", "fast forward", "skip forward"]):
-            send_hotkey(VK_L)
+            send_youtube_hotkey(VK_L)
             self.voice.speak("Skipped forward, sir.")
             return True
 
         if any(w in clean_q for w in ["rewind 10 seconds", "rewind", "skip back"]):
-            send_hotkey(VK_J)
+            send_youtube_hotkey(VK_J)
             self.voice.speak("Rewound, sir.")
             return True
 
@@ -780,6 +887,15 @@ class JarvisTaskEngine:
         # -------------------------------------------------------------
         # 4. YouTube Search & Play (Navigates in-place: NEVER opens duplicate tabs)
         # -------------------------------------------------------------
+        if clean_q in [
+            "open youtube", "open youtube in chrome", "open youtube on chrome",
+            "open yt in chrome", "open yt on chrome", "open yt",
+            "launch youtube", "go to youtube", "youtube", "start youtube"
+        ]:
+            navigate_browser_url("https://www.youtube.com")
+            self.voice.speak("Opening YouTube in Chrome now, sir.")
+            return True
+
         is_youtube = any(w in clean_q.split() for w in ["youtube", "yt"]) or "youtube" in clean_q or clean_q.startswith("play ")
         if is_youtube:
             now = time.time()
@@ -794,11 +910,14 @@ class JarvisTaskEngine:
                 r"search\s+(?:on|in)\s+(?:youtube|yt)\s+(?:for\s+)?(.+)",
                 r"(?:in|on)\s+(?:youtube|yt)\s+search\s+(?:for\s+)?(.+)",
                 r"search\s+(?:youtube|yt)\s+(?:for\s+)?(.+)",
+                r"show\s+me\s+(.+?)\s+(?:in|on)\s+(?:youtube|yt)",
+                r"show\s+me\s+(?:in|on)\s+(?:youtube|yt)\s+(.+)",
                 r"play\s+(.+?)\s+(?:in|on)\s+(?:youtube|yt)",
                 r"play\s+(?:in|on)\s+(?:youtube|yt)\s+(.+)",
                 r"play\s+(.+)",
                 r"find\s+(.+?)\s+(?:in|on)\s+(?:youtube|yt)",
-                r"look up\s+(.+?)\s+(?:in|on)\s+(?:youtube|yt)",
+                r"look\s+up\s+(.+?)\s+(?:in|on)\s+(?:youtube|yt)",
+                r"^(.+?)\s+(?:in|on)\s+(?:youtube|yt)$",
             ]
             for pattern in patterns:
                 m = re.search(pattern, clean_q)
@@ -956,7 +1075,7 @@ class JarvisTaskEngine:
             self.voice.speak(f"The current time is {now_str}, sir.")
             return True
 
-        if any(w in clean_q for w in ["date", "today", "day is it", "day of the week", "what day"]):
+        if any(w in clean_q.split() for w in ["date", "today"]) or any(p in clean_q for p in ["day is it", "day of the week", "what day", "what's the date", "what is the date"]):
             date_str = datetime.datetime.now().strftime("%A, %B %d, %Y")
             self.voice.speak(f"Today is {date_str}, sir.")
             return True
@@ -989,19 +1108,79 @@ class JarvisTaskEngine:
             return True
 
         # -------------------------------------------------------------
-        # 13. Application Launch & Close
+        # 13. Application Launch & Close, Websites, Uninstall, Update
         # -------------------------------------------------------------
-        if any(clean_q.startswith(p) for p in ["open ", "launch ", "start ", "run "]):
-            app_name = clean_q.split(" ", 1)[1].strip()
+        if any(w in clean_q for w in ["update my apps", "update apps", "update all apps"]):
+            try:
+                subprocess.Popen("start ms-windows-store:updates", shell=True)
+            except Exception:
+                pass
+            self.voice.speak("Opening updates to check and update your applications, sir.")
+            return True
+
+        m_uninst = re.search(r"uninstall\s+(.+)", clean_q)
+        if m_uninst:
+            target_app = m_uninst.group(1).strip()
+            try:
+                subprocess.Popen("start ms-settings:appsfeatures", shell=True)
+            except Exception:
+                pass
+            self.voice.speak(f"Opening Windows Installed Apps to uninstall {target_app}, sir.")
+            return True
+
+        popular_sites = {
+            "google": "https://www.google.com",
+            "youtube": "https://www.youtube.com",
+            "github": "https://www.github.com",
+            "chatgpt": "https://chatgpt.com",
+            "reddit": "https://www.reddit.com",
+            "twitter": "https://x.com",
+            "x": "https://x.com",
+            "netflix": "https://www.netflix.com",
+            "amazon": "https://www.amazon.com",
+            "gmail": "https://mail.google.com",
+            "linkedin": "https://www.linkedin.com",
+            "wikipedia": "https://www.wikipedia.org",
+        }
+
+        if any(clean_q.startswith(p) for p in ["open ", "launch ", "start ", "run ", "go to "]):
+            for p in ["open ", "launch ", "start ", "run ", "go to "]:
+                if clean_q.startswith(p):
+                    app_name = clean_q[len(p):].strip()
+                    break
+            else:
+                app_name = clean_q.split(" ", 1)[1].strip()
+
             if any(w in app_name.split() for w in ["yt", "youtube"]):
                 navigate_browser_url("https://www.youtube.com")
                 self.voice.speak("Opening YouTube in Chrome now, sir.")
                 return True
+
+            if app_name in popular_sites:
+                open_browser_url(popular_sites[app_name], prefer_chrome=True)
+                self.voice.speak(f"Opening {app_name.capitalize()} in Chrome, sir.")
+                return True
+
+            if re.search(r"\.(com|org|net|in|io|co|ai|edu|gov)$", app_name):
+                url = app_name if app_name.startswith("http") else f"https://{app_name}"
+                open_browser_url(url, prefer_chrome=True)
+                self.voice.speak(f"Opening {app_name} in Chrome, sir.")
+                return True
+
             self._open_application(app_name)
             return True
 
         if any(clean_q.startswith(p) for p in ["close ", "kill ", "terminate ", "stop "]):
             app_name = clean_q.split(" ", 1)[1].strip()
+            if app_name in ["edge", "msedge", "microsoft edge"]:
+                for p in psutil.process_iter(['name']):
+                    if p.info['name'] and 'msedge' in p.info['name'].lower():
+                        try:
+                            p.kill()
+                        except Exception:
+                            pass
+                self.voice.speak("Microsoft Edge has been closed, sir.")
+                return True
             self._close_application(app_name)
             return True
 
