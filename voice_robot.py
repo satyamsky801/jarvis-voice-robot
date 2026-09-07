@@ -3,15 +3,17 @@ J.A.R.V.I.S. — Autonomous Voice Robot Assistant
 Inspired by Tony Stark's J.A.R.V.I.S.
 
 Features:
-- Google Chrome Integration: Opens YouTube and web searches directly in Chrome (not Edge/Explorer)
-- Full YouTube Search Support: Handles "search python in yt", "play music", "open yt in chrome"
-- Fast 1-Second Response Latency (Optimized 0.75s silence cutoff & async execution)
-- Runs in Background 24/7 (Hidden background mode or interactive HUD mode)
-- Persistent Loop (Runs continuously until explicitly closed or told 'exit'/'goodbye')
-- Single-Instance Enforcement with process tree protection
-- Self-Voice Feedback Guard (Microphone ignores audio while JARVIS is speaking)
-- Zero Unsolicited Command Suggestions (No canned prompts)
-- Auto-Unmute & 100% Hardware Volume Boost (Fixes Windows microphone mute)
+- In-Place YouTube Navigation (Reuses active YouTube tab without opening duplicate tabs)
+- Full Tab Management (Close tab, open tab, close all tabs, reopen tab, next/previous tab)
+- YouTube Playback Controls (Pause, resume, mute, fullscreen, captions, next/prev video)
+- Google Chrome Integration (Always opens in Chrome, not Edge/Explorer)
+- Navigation & Maps (Directions, traffic, nearby restaurants, petrol pumps)
+- Translations & Math Solver (Translates to Hindi, solves arithmetic calculations)
+- Exact Volume by Percentage ("set volume to 50%")
+- Timers & Stopwatch (Background async timers and stopwatch)
+- App Control (WhatsApp, Instagram, Spotify, Camera, Settings)
+- 1-Second Fast Latency (0.75s silence cutoff & async execution)
+- 24/7 Background Mode & Persistent Self-Healing Loop
 - British Ryan Neural Voice via Edge-TTS (100% Free, High Quality)
 """
 
@@ -29,6 +31,7 @@ if sys.platform == "win32":
 
 import asyncio
 import ctypes
+from ctypes import wintypes
 import datetime
 import json
 import logging
@@ -66,10 +69,43 @@ try:
 except Exception:
     console = None
 
-# Virtual Key Codes for Windows Volume Control
+# Windows Win32 Virtual Key Codes
+VK_CONTROL = 0x11
+VK_SHIFT = 0x10
+VK_MENU = 0x12  # Alt
+VK_RETURN = 0x0D
+VK_SPACE = 0x20
+VK_TAB = 0x09
 VK_VOLUME_MUTE = 0xAD
 VK_VOLUME_DOWN = 0xAE
 VK_VOLUME_UP = 0xAF
+
+# Virtual key codes for alphabet keys
+VK_W = 0x57
+VK_T = 0x54
+VK_D = 0x44
+VK_R = 0x52
+VK_L = 0x4C
+VK_F = 0x46
+VK_K = 0x4B
+VK_M = 0x4D
+VK_C = 0x43
+VK_N = 0x4E
+VK_P = 0x50
+VK_J = 0x4A
+VK_V = 0x56
+
+# Win32 API setup for 64-bit clipboard and window handling
+user32 = ctypes.windll.user32
+kernel32 = ctypes.windll.kernel32
+
+kernel32.GlobalAlloc.restype = ctypes.c_void_p
+kernel32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
+kernel32.GlobalLock.restype = ctypes.c_void_p
+kernel32.GlobalLock.argtypes = [ctypes.c_void_p]
+kernel32.GlobalUnlock.argtypes = [ctypes.c_void_p]
+user32.SetClipboardData.restype = ctypes.c_void_p
+user32.SetClipboardData.argtypes = [wintypes.UINT, ctypes.c_void_p]
 
 # Assistant Settings
 VOICE_NAME = "en-GB-RyanNeural"  # British J.A.R.V.I.S. voice
@@ -96,11 +132,56 @@ def safe_print(message: str, style: str = ""):
         pass
 
 
+def send_hotkey(*keys):
+    """Simulate key press combination in Windows."""
+    for k in keys:
+        user32.keybd_event(k, 0, 0, 0)
+    time.sleep(0.04)
+    for k in reversed(keys):
+        user32.keybd_event(k, 0, 2, 0)
+
+
+def set_clipboard(text: str) -> bool:
+    """Set Windows clipboard text using 64-bit safe Win32 API."""
+    if not user32.OpenClipboard(None):
+        return False
+    try:
+        user32.EmptyClipboard()
+        data = text.encode('utf-16le') + b'\x00\x00'
+        h = kernel32.GlobalAlloc(0x0002, len(data))
+        p = kernel32.GlobalLock(h)
+        ctypes.memmove(p, data, len(data))
+        kernel32.GlobalUnlock(h)
+        user32.SetClipboardData(13, h)  # CF_UNICODETEXT = 13
+        return True
+    finally:
+        user32.CloseClipboard()
+
+
+def find_browser_window():
+    """Find visible Chrome or Edge browser window handle."""
+    target_hwnd = None
+
+    def enum_cb(hwnd, lparam):
+        nonlocal target_hwnd
+        if user32.IsWindowVisible(hwnd):
+            length = user32.GetWindowTextLengthW(hwnd)
+            if length > 0:
+                buff = ctypes.create_unicode_buffer(length + 1)
+                user32.GetWindowTextW(hwnd, buff, length + 1)
+                title = buff.value.lower()
+                if ('youtube' in title or 'chrome' in title or 'edge' in title) and not ('visual studio' in title or 'antigravity' in title):
+                    target_hwnd = hwnd
+                    return False
+        return True
+
+    WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+    user32.EnumWindows(WNDENUMPROC(enum_cb), 0)
+    return target_hwnd
+
+
 def open_browser_url(url: str, prefer_chrome: bool = True):
-    """
-    Open URL in Google Chrome if installed on Windows.
-    Falls back to Windows default browser only if Chrome is not found.
-    """
+    """Open URL in Google Chrome if installed, otherwise default browser."""
     if prefer_chrome:
         chrome_paths = [
             r"C:\Program Files\Google\Chrome\Application\chrome.exe",
@@ -123,6 +204,30 @@ def open_browser_url(url: str, prefer_chrome: bool = True):
             pass
 
     webbrowser.open(url)
+
+
+def navigate_browser_url(url: str):
+    """
+    Navigate to URL in place if Chrome/YouTube is already open without opening duplicate tabs.
+    If no browser is open, launches Chrome.
+    """
+    hwnd = find_browser_window()
+    if hwnd:
+        try:
+            user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+            user32.SetForegroundWindow(hwnd)
+            time.sleep(0.12)
+            set_clipboard(url)
+            send_hotkey(VK_CONTROL, VK_L)  # Focus address bar
+            time.sleep(0.06)
+            send_hotkey(VK_CONTROL, VK_V)  # Paste
+            time.sleep(0.06)
+            send_hotkey(VK_RETURN)         # Enter
+            return
+        except Exception:
+            pass
+
+    open_browser_url(url, prefer_chrome=True)
 
 
 # ===========================================================================
@@ -315,11 +420,7 @@ class JarvisEar:
             self.speech_threshold = 0.005
 
     def record_phrase(self, max_duration_sec: float = 6.0, silence_cutoff: float = 0.75) -> Tuple[Optional[sr.AudioData], Optional[str]]:
-        """
-        Record speech with ultra-fast 0.75s silence cutoff.
-        Ignores microphone input while J.A.R.V.I.S. is speaking to prevent self-voice loops.
-        """
-        # Self-voice feedback guard: Do not listen to JARVIS's own voice
+        """Record speech with ultra-fast 0.75s silence cutoff and feedback guard."""
         if self.voice and self.voice.is_speaking:
             time.sleep(0.1)
             return None, None
@@ -350,7 +451,6 @@ class JarvisEar:
 
         with stream:
             while (time.time() - start_time) < max_duration_sec:
-                # Check for keyboard typing if console is available
                 try:
                     if msvcrt.kbhit():
                         ch = msvcrt.getwche()
@@ -375,7 +475,6 @@ class JarvisEar:
                 chunk_dur = len(chunk) / self.sample_rate
                 rms = float(np.sqrt(np.mean(np.square(chunk))))
 
-                # Detect speech activity
                 if rms > self.speech_threshold:
                     if not speech_started:
                         speech_started = True
@@ -401,36 +500,27 @@ class JarvisEar:
         if not speech_started or not recorded_chunks:
             return None, None
 
-        # Concatenate audio chunks
         full_audio = np.concatenate(recorded_chunks, axis=0)
-
-        # Convert to mono
         if full_audio.ndim > 1 and full_audio.shape[1] > 1:
             full_audio = full_audio.mean(axis=1)
         elif full_audio.ndim > 1:
             full_audio = full_audio[:, 0]
 
-        # Resample to 16,000 Hz for Google Speech Recognition
         target_samples = int(len(full_audio) * 16000 / self.sample_rate)
         resampled = scipy.signal.resample(full_audio, target_samples)
 
-        # Boost & Normalize audio peak to 0.8
         peak = float(np.max(np.abs(resampled)))
         if peak > 0.0001:
             resampled = resampled * (0.8 / peak)
 
-        # Convert to 16-bit PCM bytes
         pcm16 = (np.clip(resampled, -1.0, 1.0) * 32767).astype(np.int16).tobytes()
-
         return sr.AudioData(pcm16, 16000, 2), None
 
     def listen(self, timeout_sec: float = 5.0) -> str:
         """Listen to the microphone and transcribe spoken words."""
         audio_data, typed_text = self.record_phrase(max_duration_sec=timeout_sec, silence_cutoff=0.75)
-
         if typed_text:
             return typed_text
-
         if not audio_data:
             return ""
 
@@ -448,15 +538,16 @@ class JarvisEar:
 
 
 # ===========================================================================
-# 3. TASK & CONVERSATION ENGINE (GOOGLE CHROME FIRST & DIRECT ANSWERS)
+# 3. TASK & CONVERSATION ENGINE (TAB MANAGEMENT, IN-PLACE YT & EXTENDED TOOLS)
 # ===========================================================================
 class JarvisTaskEngine:
-    """Fast execution engine: executes commands in under 1 second with clean dialogue."""
+    """Full-featured execution engine supporting tabs, YouTube playback, maps, and system control."""
 
     def __init__(self, voice: JarvisVoice):
         self.voice = voice
         self.last_action_time = 0.0
         self.last_action_query = ""
+        self.stopwatch_start = None
         self.app_map = {
             "chrome": "start chrome",
             "google chrome": "start chrome",
@@ -483,7 +574,7 @@ class JarvisTaskEngine:
     def _normalize(self, text: str) -> str:
         """Normalize query text, remove punctuation, and correct common STT misrecognitions."""
         q = text.lower().strip()
-        q = re.sub(r'[^\w\s]', ' ', q)
+        q = re.sub(r'[^\w\s\+\-\*\/\%\.]', ' ', q)
         q = " ".join(q.split())
 
         replacements = {
@@ -556,22 +647,16 @@ class JarvisTaskEngine:
         return cleaned
 
     def execute_command(self, query: str) -> bool:
-        """
-        Parse user command or conversational speech.
-        Executes actions immediately and speaks confirmation concurrently.
-        Returns False ONLY when user explicitly asks to exit/shutdown.
-        """
+        """Parse user command or conversational speech and execute immediately."""
         raw_norm = self._normalize(query)
         if not raw_norm:
             return True
 
-        # Strip wake words from start
         for w in WAKE_WORDS:
             if raw_norm.startswith(w):
                 raw_norm = raw_norm[len(w):].strip()
                 break
 
-        # Check pure conversational fillers
         if raw_norm in [
             "i am saying that", "i m saying that", "what i am saying", "what i m saying",
             "i was saying", "listen to me", "can you hear me", "are you listening",
@@ -580,7 +665,6 @@ class JarvisTaskEngine:
             self.voice.speak("I am listening attentively, sir. Please go ahead.")
             return True
 
-        # Clean conversational prefixes for task routing
         clean_q = self._strip_prefixes(raw_norm)
         if not clean_q:
             clean_q = raw_norm
@@ -593,52 +677,279 @@ class JarvisTaskEngine:
             return False
 
         # -------------------------------------------------------------
-        # 2. Natural Conversation & Dialogue
+        # 2. Browser & Tab Management (Opening & Closing Tabs)
         # -------------------------------------------------------------
-        if any(p in raw_norm for p in ["not saying that", "i didn't say that", "did not say that", "not that", "that's wrong", "i didn't mean that"]):
-            self.voice.speak("My apologies, sir. Please tell me what you would like me to do.")
+        if any(w in clean_q for w in ["close tab", "close this tab", "close current tab"]):
+            send_hotkey(VK_CONTROL, VK_W)
+            self.voice.speak("Tab closed, sir.")
             return True
 
-        if raw_norm in ["hello", "hi", "hey", "are you there", "wake up"]:
-            self.voice.speak("At your service, sir. What can I do for you?")
+        if any(w in clean_q for w in ["close all tabs", "close all windows", "close browser"]):
+            send_hotkey(VK_CONTROL, VK_SHIFT, VK_W)
+            self.voice.speak("Browser tabs closed, sir.")
             return True
 
-        if any(p in raw_norm for p in ["how are you", "how are things", "how's it going"]):
-            self.voice.speak("All my subroutines are fully operational, sir. How are you doing today?")
+        if any(w in clean_q for w in ["open new tab", "open a new tab", "new tab"]):
+            send_hotkey(VK_CONTROL, VK_T)
+            self.voice.speak("New tab opened, sir.")
             return True
 
-        if "who are you" in raw_norm or "what is your name" in raw_norm:
-            self.voice.speak("I am J.A.R.V.I.S., your autonomous voice assistant. Ready for your instructions, sir.")
+        if any(w in clean_q for w in ["reopen closed tab", "reopen last closed tab", "reopen last tab", "undo close tab"]):
+            send_hotkey(VK_CONTROL, VK_SHIFT, VK_T)
+            self.voice.speak("Reopened last closed tab, sir.")
             return True
 
-        if any(p in raw_norm for p in ["what are you doing", "what's up", "what are you up to"]):
-            self.voice.speak("Monitoring systems and waiting for your command, sir.")
+        if any(w in clean_q for w in ["switch to next tab", "next tab"]):
+            send_hotkey(VK_CONTROL, VK_TAB)
+            self.voice.speak("Switched to next tab, sir.")
             return True
 
-        if any(p in raw_norm for p in ["thank you", "thanks", "good job", "well done"]):
-            self.voice.speak("You are most welcome, sir.")
+        if any(w in clean_q for w in ["switch to previous tab", "previous tab"]):
+            send_hotkey(VK_CONTROL, VK_SHIFT, VK_TAB)
+            self.voice.speak("Switched to previous tab, sir.")
             return True
 
-        if any(p in raw_norm for p in ["who made you", "who created you"]):
-            self.voice.speak("I was created as an autonomous J.A.R.V.I.S. voice robot assistant, inspired by Tony Stark's system, sir.")
+        if any(w in clean_q for w in ["bookmark this page", "bookmark page", "bookmark tab"]):
+            send_hotkey(VK_CONTROL, VK_D)
+            self.voice.speak("Page bookmarked, sir.")
             return True
 
-        if any(p in raw_norm for p in ["what can you do", "help me", "features"]):
-            self.voice.speak("I can launch applications, search YouTube in Chrome, check your PC diagnostics, adjust volume, give time and weather, take notes, and answer questions directly by speaking, sir.")
+        if any(w in clean_q for w in ["refresh page", "reload tab", "reload page"]):
+            send_hotkey(VK_CONTROL, VK_R)
+            self.voice.speak("Page refreshed, sir.")
             return True
 
-        if any(p in raw_norm for p in ["tell me a joke", "make me laugh"]):
-            jokes = [
-                "Why do programmers prefer dark mode? Because light attracts bugs, sir.",
-                "There are 10 types of people in the world: those who understand binary, and those who don't, sir.",
-                "Why was the computer cold? It left its Windows open, sir.",
-                "A SQL query walks into a bar, walks up to two tables and asks: Can I join you?",
+        # -------------------------------------------------------------
+        # 3. YouTube Video In-Page Controls (Playback, Captions, Next)
+        # -------------------------------------------------------------
+        if any(w in clean_q for w in ["pause video", "pause the video", "resume video", "resume the video", "pause", "resume", "stop video"]):
+            send_hotkey(VK_K)
+            self.voice.speak("Video playback toggled, sir.")
+            return True
+
+        if any(w in clean_q for w in ["mute video", "unmute video"]):
+            send_hotkey(VK_M)
+            self.voice.speak("Video sound toggled, sir.")
+            return True
+
+        if any(w in clean_q for w in ["full screen", "fullscreen", "exit full screen", "theater mode"]):
+            send_hotkey(VK_F)
+            self.voice.speak("Video display toggled, sir.")
+            return True
+
+        if any(w in clean_q for w in ["turn on captions", "turn off captions", "captions", "subtitles"]):
+            send_hotkey(VK_C)
+            self.voice.speak("Captions toggled, sir.")
+            return True
+
+        if any(w in clean_q for w in ["next video", "skip video", "play next video"]):
+            send_hotkey(VK_SHIFT, VK_N)
+            self.voice.speak("Playing next video, sir.")
+            return True
+
+        if any(w in clean_q for w in ["previous video", "play previous video"]):
+            send_hotkey(VK_SHIFT, VK_P)
+            self.voice.speak("Playing previous video, sir.")
+            return True
+
+        if any(w in clean_q for w in ["forward 10 seconds", "fast forward", "skip forward"]):
+            send_hotkey(VK_L)
+            self.voice.speak("Skipped forward, sir.")
+            return True
+
+        if any(w in clean_q for w in ["rewind 10 seconds", "rewind", "skip back"]):
+            send_hotkey(VK_J)
+            self.voice.speak("Rewound, sir.")
+            return True
+
+        if any(w in clean_q for w in ["trending videos", "go to trending", "trending on youtube"]):
+            navigate_browser_url("https://www.youtube.com/feed/trending")
+            self.voice.speak("Opening trending videos on YouTube, sir.")
+            return True
+
+        if any(w in clean_q for w in ["my subscriptions", "open subscriptions", "open my subscriptions"]):
+            navigate_browser_url("https://www.youtube.com/feed/subscriptions")
+            self.voice.speak("Opening your subscriptions on YouTube, sir.")
+            return True
+
+        if any(w in clean_q for w in ["show my watch history", "watch history", "my watch history"]):
+            navigate_browser_url("https://www.youtube.com/feed/history")
+            self.voice.speak("Opening your YouTube watch history, sir.")
+            return True
+
+        # -------------------------------------------------------------
+        # 4. YouTube Search & Play (Navigates in-place: NEVER opens duplicate tabs)
+        # -------------------------------------------------------------
+        is_youtube = any(w in clean_q.split() for w in ["youtube", "yt"]) or "youtube" in clean_q or clean_q.startswith("play ")
+        if is_youtube:
+            now = time.time()
+            if (now - self.last_action_time < 2.0) and (clean_q == self.last_action_query):
+                return True
+            self.last_action_time = now
+            self.last_action_query = clean_q
+
+            search_query = ""
+            patterns = [
+                r"search\s+(?:for\s+)?(.+?)\s+(?:in|on)\s+(?:youtube|yt)",
+                r"search\s+(?:on|in)\s+(?:youtube|yt)\s+(?:for\s+)?(.+)",
+                r"(?:in|on)\s+(?:youtube|yt)\s+search\s+(?:for\s+)?(.+)",
+                r"search\s+(?:youtube|yt)\s+(?:for\s+)?(.+)",
+                r"play\s+(.+?)\s+(?:in|on)\s+(?:youtube|yt)",
+                r"play\s+(?:in|on)\s+(?:youtube|yt)\s+(.+)",
+                r"play\s+(.+)",
+                r"find\s+(.+?)\s+(?:in|on)\s+(?:youtube|yt)",
+                r"look up\s+(.+?)\s+(?:in|on)\s+(?:youtube|yt)",
             ]
-            self.voice.speak(random.choice(jokes))
+            for pattern in patterns:
+                m = re.search(pattern, clean_q)
+                if m:
+                    cand = m.group(1).strip()
+                    cand = re.sub(r"\s+(?:in|on)\s+chrome$", "", cand).strip()
+                    if cand and cand not in ["youtube", "yt"]:
+                        search_query = cand
+                        break
+
+            if search_query:
+                url = f"https://www.youtube.com/results?search_query={urllib.parse.quote_plus(search_query)}"
+                navigate_browser_url(url)
+                self.voice.speak(f"Searching YouTube for {search_query}, sir.")
+                return True
+
+            navigate_browser_url("https://www.youtube.com")
+            self.voice.speak("Opening YouTube in Chrome now, sir.")
             return True
 
         # -------------------------------------------------------------
-        # 3. Time and Date Intents (Instant Response)
+        # 5. Math Solver & Calculations ("what is 25 * 40")
+        # -------------------------------------------------------------
+        math_result = self._evaluate_math(clean_q)
+        if math_result is not None:
+            self.voice.speak(f"The answer is {math_result}, sir.")
+            return True
+
+        # -------------------------------------------------------------
+        # 6. Volume Control by Percentage & Steps
+        # -------------------------------------------------------------
+        m_vol = re.search(r"(?:set\s+)?volume\s+(?:to\s+)?(\d+)\s*(?:%|percent)?", clean_q)
+        if m_vol:
+            percent = max(0, min(100, int(m_vol.group(1))))
+            self._set_volume_percentage(percent)
+            self.voice.speak(f"Master volume set to {percent} percent, sir.")
+            return True
+
+        if any(w in clean_q for w in ["volume up", "increase volume", "louder"]):
+            self._adjust_volume(up=True, steps=5)
+            self.voice.speak("Volume increased, sir.")
+            return True
+
+        if any(w in clean_q for w in ["volume down", "decrease volume", "lower volume", "quieter"]):
+            self._adjust_volume(up=False, steps=5)
+            self.voice.speak("Volume decreased, sir.")
+            return True
+
+        if any(w in clean_q for w in ["mute volume", "mute", "unmute volume", "unmute"]):
+            user32.keybd_event(VK_VOLUME_MUTE, 0, 0, 0)
+            user32.keybd_event(VK_VOLUME_MUTE, 0, 2, 0)
+            self.voice.speak("Master volume toggled, sir.")
+            return True
+
+        # -------------------------------------------------------------
+        # 7. Timers & Stopwatch
+        # -------------------------------------------------------------
+        m_timer = re.search(r"(?:set\s+a?\s*)?timer\s+for\s+(\d+)\s*(minute|minutes|min|mins|second|seconds|sec|secs)", clean_q)
+        if m_timer:
+            amount = int(m_timer.group(1))
+            unit = m_timer.group(2)
+            seconds = amount * 60 if "min" in unit else amount
+
+            def timer_thread():
+                time.sleep(seconds)
+                self.voice.speak(f"Sir, your timer for {amount} {unit} has finished!")
+
+            threading.Thread(target=timer_thread, daemon=True).start()
+            self.voice.speak(f"Timer set for {amount} {unit}, sir.")
+            return True
+
+        if "start stopwatch" in clean_q:
+            self.stopwatch_start = time.time()
+            self.voice.speak("Stopwatch started, sir.")
+            return True
+
+        if "stop stopwatch" in clean_q:
+            if self.stopwatch_start:
+                elapsed = int(time.time() - self.stopwatch_start)
+                self.stopwatch_start = None
+                self.voice.speak(f"Stopwatch stopped at {elapsed} seconds, sir.")
+            else:
+                self.voice.speak("The stopwatch is not running, sir.")
+            return True
+
+        # -------------------------------------------------------------
+        # 8. Navigation, Maps & Directions
+        # -------------------------------------------------------------
+        if any(clean_q.startswith(p) for p in ["navigate to ", "directions to ", "show traffic to ", "how long to reach "]):
+            for p in ["navigate to ", "directions to ", "show traffic to ", "how long to reach "]:
+                if clean_q.startswith(p):
+                    dest = clean_q[len(p):].strip()
+                    url = f"https://www.google.com/maps/dir/?api=1&destination={urllib.parse.quote_plus(dest)}"
+                    open_browser_url(url, prefer_chrome=True)
+                    self.voice.speak(f"Navigating to {dest} on Google Maps, sir.")
+                    return True
+
+        if any(w in clean_q for w in ["nearby restaurants", "restaurants near me", "find nearby restaurants"]):
+            open_browser_url("https://www.google.com/maps/search/nearby+restaurants", prefer_chrome=True)
+            self.voice.speak("Finding nearby restaurants on Google Maps, sir.")
+            return True
+
+        if any(w in clean_q for w in ["petrol pumps near me", "find petrol pumps", "gas stations near me"]):
+            open_browser_url("https://www.google.com/maps/search/petrol+pumps+near+me", prefer_chrome=True)
+            self.voice.speak("Locating nearby petrol stations on Google Maps, sir.")
+            return True
+
+        # -------------------------------------------------------------
+        # 9. Translations ("translate [phrase] to hindi")
+        # -------------------------------------------------------------
+        if "translate " in clean_q and ("to hindi" in clean_q or "in hindi" in clean_q):
+            phrase = clean_q.replace("translate ", "").replace("to hindi", "").replace("in hindi", "").strip()
+            url = f"https://translate.google.com/?sl=auto&tl=hi&text={urllib.parse.quote_plus(phrase)}"
+            open_browser_url(url, prefer_chrome=True)
+            self.voice.speak(f"Translating '{phrase}' to Hindi in Chrome, sir.")
+            return True
+
+        # -------------------------------------------------------------
+        # 10. Communication & Social Apps
+        # -------------------------------------------------------------
+        if clean_q in ["open whatsapp", "launch whatsapp", "whatsapp"]:
+            open_browser_url("https://web.whatsapp.com", prefer_chrome=True)
+            self.voice.speak("Opening WhatsApp in Chrome, sir.")
+            return True
+
+        if clean_q in ["open instagram", "launch instagram", "instagram"]:
+            open_browser_url("https://www.instagram.com", prefer_chrome=True)
+            self.voice.speak("Opening Instagram in Chrome, sir.")
+            return True
+
+        if clean_q in ["open spotify", "launch spotify", "spotify"]:
+            try:
+                subprocess.Popen("start spotify:", shell=True)
+                self.voice.speak("Launching Spotify, sir.")
+            except Exception:
+                open_browser_url("https://open.spotify.com", prefer_chrome=True)
+                self.voice.speak("Opening Spotify Web Player, sir.")
+            return True
+
+        if "whatsapp message" in clean_q or clean_q.startswith("send a whatsapp message"):
+            open_browser_url("https://web.whatsapp.com", prefer_chrome=True)
+            self.voice.speak("Opening WhatsApp Web. Please select the contact to send your message, sir.")
+            return True
+
+        if any(w in clean_q for w in ["open camera", "take a photo", "record a video"]):
+            subprocess.Popen("start microsoft.windows.camera:", shell=True)
+            self.voice.speak("Launching Windows Camera, sir.")
+            return True
+
+        # -------------------------------------------------------------
+        # 11. Time and Date Intents (Instant Response)
         # -------------------------------------------------------------
         if "timer" not in clean_q and any(w in clean_q for w in ["time", "clock"]):
             now_str = datetime.datetime.now().strftime("%I:%M %p")
@@ -651,7 +962,7 @@ class JarvisTaskEngine:
             return True
 
         # -------------------------------------------------------------
-        # 4. System Diagnostics & Hardware Status
+        # 12. System Diagnostics & Hardware Status
         # -------------------------------------------------------------
         is_system_status = (
             any(w in clean_q for w in [
@@ -678,75 +989,12 @@ class JarvisTaskEngine:
             return True
 
         # -------------------------------------------------------------
-        # 5. Volume Control (Immediate Execution)
-        # -------------------------------------------------------------
-        if any(w in clean_q for w in ["volume up", "increase volume", "louder"]):
-            self._adjust_volume(up=True, steps=5)
-            self.voice.speak("Volume increased, sir.")
-            return True
-
-        if any(w in clean_q for w in ["volume down", "decrease volume", "lower volume", "quieter"]):
-            self._adjust_volume(up=False, steps=5)
-            self.voice.speak("Volume decreased, sir.")
-            return True
-
-        if any(w in clean_q for w in ["mute", "unmute", "silence volume"]):
-            ctypes.windll.user32.keybd_event(VK_VOLUME_MUTE, 0, 0, 0)
-            ctypes.windll.user32.keybd_event(VK_VOLUME_MUTE, 0, 2, 0)
-            self.voice.speak("Master volume toggled, sir.")
-            return True
-
-        # -------------------------------------------------------------
-        # 6. Media & YouTube (Always Opens in Google Chrome - Searches & Plays)
-        # -------------------------------------------------------------
-        is_youtube = any(w in clean_q.split() for w in ["youtube", "yt"]) or "youtube" in clean_q or clean_q.startswith("play ")
-        if is_youtube:
-            now = time.time()
-            if (now - self.last_action_time < 2.0) and (clean_q == self.last_action_query):
-                return True
-            self.last_action_time = now
-            self.last_action_query = clean_q
-
-            # Extract search query if present
-            search_query = ""
-            patterns = [
-                r"search\s+(?:for\s+)?(.+?)\s+(?:in|on)\s+(?:youtube|yt)",
-                r"search\s+(?:on|in)\s+(?:youtube|yt)\s+(?:for\s+)?(.+)",
-                r"(?:in|on)\s+(?:youtube|yt)\s+search\s+(?:for\s+)?(.+)",
-                r"search\s+(?:youtube|yt)\s+(?:for\s+)?(.+)",
-                r"play\s+(.+?)\s+(?:in|on)\s+(?:youtube|yt)",
-                r"play\s+(?:in|on)\s+(?:youtube|yt)\s+(.+)",
-                r"play\s+(.+)",
-                r"find\s+(.+?)\s+(?:in|on)\s+(?:youtube|yt)",
-                r"look up\s+(.+?)\s+(?:in|on)\s+(?:youtube|yt)",
-            ]
-            for pattern in patterns:
-                m = re.search(pattern, clean_q)
-                if m:
-                    cand = m.group(1).strip()
-                    cand = re.sub(r"\s+(?:in|on)\s+chrome$", "", cand).strip()
-                    if cand and cand not in ["youtube", "yt"]:
-                        search_query = cand
-                        break
-
-            if search_query:
-                url = f"https://www.youtube.com/results?search_query={urllib.parse.quote_plus(search_query)}"
-                open_browser_url(url, prefer_chrome=True)
-                self.voice.speak(f"Searching YouTube for {search_query}, sir.")
-                return True
-
-            open_browser_url("https://www.youtube.com", prefer_chrome=True)
-            self.voice.speak("Opening YouTube in Chrome now, sir.")
-            return True
-
-        # -------------------------------------------------------------
-        # 7. Applications (Immediate Launch in < 1 Second)
+        # 13. Application Launch & Close
         # -------------------------------------------------------------
         if any(clean_q.startswith(p) for p in ["open ", "launch ", "start ", "run "]):
             app_name = clean_q.split(" ", 1)[1].strip()
-            # If user asks "open yt in chrome" or "open youtube in chrome"
             if any(w in app_name.split() for w in ["yt", "youtube"]):
-                open_browser_url("https://www.youtube.com", prefer_chrome=True)
+                navigate_browser_url("https://www.youtube.com")
                 self.voice.speak("Opening YouTube in Chrome now, sir.")
                 return True
             self._open_application(app_name)
@@ -758,10 +1006,10 @@ class JarvisTaskEngine:
             return True
 
         # -------------------------------------------------------------
-        # 8. Web Search (Always Opens in Google Chrome)
+        # 14. Web Search in Chrome
         # -------------------------------------------------------------
-        if any(clean_q.startswith(p) for p in ["search google for ", "google search ", "search on google "]):
-            for p in ["search google for ", "google search ", "search on google "]:
+        if any(clean_q.startswith(p) for p in ["search google for ", "google search ", "search on google ", "search "]):
+            for p in ["search google for ", "google search ", "search on google ", "search "]:
                 if clean_q.startswith(p):
                     search_query = clean_q[len(p):].strip()
                     if search_query:
@@ -771,17 +1019,17 @@ class JarvisTaskEngine:
                         return True
 
         # -------------------------------------------------------------
-        # 9. Screenshots
+        # 15. Screenshots
         # -------------------------------------------------------------
         if any(w in clean_q for w in ["screenshot", "capture screen", "screen shot"]):
             self._take_screenshot()
             return True
 
         # -------------------------------------------------------------
-        # 10. Notes & Reminders
+        # 16. Notes & Reminders
         # -------------------------------------------------------------
-        if any(clean_q.startswith(p) for p in ["take a note", "note down", "write a note", "save a note"]):
-            for p in ["take a note", "note down", "write a note", "save a note"]:
+        if any(clean_q.startswith(p) for p in ["take a note", "note down", "write a note", "create a note"]):
+            for p in ["take a note", "note down", "write a note", "create a note"]:
                 if clean_q.startswith(p):
                     note_content = clean_q[len(p):].strip()
                     break
@@ -805,7 +1053,7 @@ class JarvisTaskEngine:
             return True
 
         # -------------------------------------------------------------
-        # 11. Weather
+        # 17. Weather
         # -------------------------------------------------------------
         if "weather" in clean_q:
             words = clean_q.split()
@@ -818,35 +1066,105 @@ class JarvisTaskEngine:
             return True
 
         # -------------------------------------------------------------
-        # 12. Lock Computer
+        # 18. Lock Screen
         # -------------------------------------------------------------
         if any(w in clean_q for w in ["lock computer", "lock pc", "lock screen", "lock workstation"]):
             self.voice.speak("Locking workstation now, sir.")
-            ctypes.windll.user32.LockWorkStation()
+            user32.LockWorkStation()
             return True
 
         # -------------------------------------------------------------
-        # 13. General Knowledge / Q&A (Speaks Answer Directly)
+        # 19. Natural Dialogue & Chat
+        # -------------------------------------------------------------
+        if any(p in raw_norm for p in ["not saying that", "i didn't say that", "did not say that", "not that", "that's wrong", "i didn't mean that"]):
+            self.voice.speak("My apologies, sir. Please tell me what you would like me to do.")
+            return True
+
+        if raw_norm in ["hello", "hi", "hey", "are you there", "wake up"]:
+            self.voice.speak("At your service, sir. What can I do for you?")
+            return True
+
+        if any(p in raw_norm for p in ["how are you", "how are things", "how's it going"]):
+            self.voice.speak("All my subroutines are fully operational, sir. How are you doing today?")
+            return True
+
+        if "who are you" in raw_norm or "what is your name" in raw_norm:
+            self.voice.speak("I am J.A.R.V.I.S., your autonomous voice assistant. Ready for your instructions, sir.")
+            return True
+
+        if any(p in raw_norm for p in ["thank you", "thanks", "good job", "well done"]):
+            self.voice.speak("You are most welcome, sir.")
+            return True
+
+        if any(p in raw_norm for p in ["who made you", "who created you"]):
+            self.voice.speak("I was created as an autonomous J.A.R.V.I.S. voice robot assistant, inspired by Tony Stark's system, sir.")
+            return True
+
+        if any(p in raw_norm for p in ["tell me a joke", "make me laugh"]):
+            jokes = [
+                "Why do programmers prefer dark mode? Because light attracts bugs, sir.",
+                "There are 10 types of people in the world: those who understand binary, and those who don't, sir.",
+                "Why was the computer cold? It left its Windows open, sir.",
+                "A SQL query walks into a bar, walks up to two tables and asks: Can I join you?",
+            ]
+            self.voice.speak(random.choice(jokes))
+            return True
+
+        # -------------------------------------------------------------
+        # 20. General Knowledge / Q&A (Speaks Answer Directly)
         # -------------------------------------------------------------
         answer = self._get_background_knowledge(clean_q) or self._get_background_knowledge(raw_norm)
         if answer:
             self.voice.speak(answer)
             return True
 
-        # Fallback conversational response - Clean, polite, and NO command suggestions!
+        # Fallback conversational response
         self.voice.speak("Understood, sir. I am right here listening.")
         return True
+
+    def _evaluate_math(self, query: str) -> Optional[str]:
+        """Safely evaluate arithmetic calculations."""
+        clean = query.lower()
+        for prefix in ["what is ", "calculate ", "solve ", "how much is ", "what s "]:
+            if clean.startswith(prefix):
+                clean = clean[len(prefix):].strip()
+                break
+
+        clean = clean.replace("plus", "+").replace("minus", "-").replace("times", "*").replace("multiplied by", "*").replace("into", "*").replace("x", "*").replace("divided by", "/").replace("over", "/")
+        clean = re.sub(r'(\d+)\s*percent\s*of\s*(\d+)', r'(\1/100)*\2', clean)
+        clean = re.sub(r'(\d+)%', r'(\1/100)', clean)
+
+        if re.match(r'^[\d\s\+\-\*\/\(\)\.]+$', clean) and any(op in clean for op in "+-*/"):
+            try:
+                result = eval(clean, {"__builtins__": None}, {})
+                if isinstance(result, float) and result.is_integer():
+                    result = int(result)
+                return str(result)
+            except Exception:
+                return None
+        return None
+
+    def _set_volume_percentage(self, percent: int):
+        """Set Windows master volume directly via pycaw."""
+        try:
+            from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
+            from comtypes import CLSCTX_ALL
+            devices = AudioUtilities.GetSpeakers()
+            volume = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None).QueryInterface(IAudioEndpointVolume)
+            volume.SetMasterVolumeLevelScalar(percent / 100.0, None)
+        except Exception:
+            pass
 
     def _open_application(self, name: str):
         """Open desktop application immediately."""
         clean_name = name.lower().strip()
         if "chrome" in clean_name and any(w in clean_name for w in ["yt", "youtube"]):
-            open_browser_url("https://www.youtube.com", prefer_chrome=True)
+            navigate_browser_url("https://www.youtube.com")
             self.voice.speak("Opening YouTube in Chrome now, sir.")
             return
 
         if clean_name in ["yt", "youtube"]:
-            open_browser_url("https://www.youtube.com", prefer_chrome=True)
+            navigate_browser_url("https://www.youtube.com")
             self.voice.speak("Opening YouTube in Chrome now, sir.")
             return
 
@@ -886,8 +1204,8 @@ class JarvisTaskEngine:
         """Adjust master volume."""
         key = VK_VOLUME_UP if up else VK_VOLUME_DOWN
         for _ in range(steps):
-            ctypes.windll.user32.keybd_event(key, 0, 0, 0)
-            ctypes.windll.user32.keybd_event(key, 0, 2, 0)
+            user32.keybd_event(key, 0, 0, 0)
+            user32.keybd_event(key, 0, 2, 0)
             time.sleep(0.01)
 
     def _take_screenshot(self):
@@ -1007,8 +1325,8 @@ def display_hud(device_name: str, threshold: float):
         console.print(Panel(Text(banner, justify="center", style="bold cyan"), box=ROUNDED, style="cyan"))
         console.print("[dim cyan]Voice Engine:[/dim cyan]     [bold green]Edge-TTS (British J.A.R.V.I.S. Ryan Neural)[/bold green]")
         console.print(f"[dim cyan]Microphone:[/dim cyan]       [bold green]{device_name} (ACTIVE & UNMUTED 100%)[/bold green]")
-        console.print("[dim cyan]Default Browser:[/dim cyan]  [bold green]Google Chrome Preferred[/bold green]")
-        console.print("[dim cyan]Mode:[/dim cyan]             [bold white]Ultra-Fast 1-Sec Latency & Persistent Background Listener[/bold white]")
+        console.print("[dim cyan]Browser Engine:[/dim cyan]   [bold green]Google Chrome Integration (Tab Navigation & Control)[/bold green]")
+        console.print("[dim cyan]Mode:[/dim cyan]             [bold white]Ultra-Fast 1-Sec Latency & In-Place YouTube Navigator[/bold white]")
         console.print("[dim cyan]Status:[/dim cyan]           [bold green]Online & Ready (Runs continuously until closed)[/bold green]\n")
     except Exception:
         pass
@@ -1016,12 +1334,9 @@ def display_hud(device_name: str, threshold: float):
 
 def main():
     """Main voice loop - runs continuously in background or foreground until explicitly closed."""
-    # Ensure no duplicate instances run concurrently
     enforce_single_instance()
 
     voice = JarvisVoice()
-
-    # Automatically ensure Windows microphone is unmuted and boosted to 100%
     ensure_microphone_active_and_unmuted()
 
     ear = JarvisEar(voice=voice)
@@ -1030,10 +1345,8 @@ def main():
     ear.calibrate(duration_sec=0.3)
     display_hud(ear.device_name, ear.speech_threshold)
 
-    # Initial Spoken Greeting
-    voice.speak("All systems online. J.A.R.V.I.S. voice protocol active. I am listening continuously, sir.")
+    voice.speak("All systems online. J.A.R.V.I.S. voice protocol active. Ready for your commands, sir.")
 
-    # Persistent loop: keeps running forever until user explicitly commands exit/goodbye
     while True:
         try:
             safe_print("● [LISTENING...] (Speak or type your command)", "bold green")
@@ -1044,14 +1357,12 @@ def main():
                 safe_print(f"[YOU]: {recognized_text}", "bold yellow")
                 keep_running = engine.execute_command(recognized_text)
                 if not keep_running:
-                    # User explicitly requested exit/shutdown
                     break
 
         except KeyboardInterrupt:
             voice.speak("Emergency stop initiated. Goodbye, sir.")
             break
         except Exception as e:
-            # Self-healing: Never terminate on errors
             safe_print(f"(System notice: {e})", "dim red")
             time.sleep(0.5)
 
