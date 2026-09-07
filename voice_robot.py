@@ -4,8 +4,10 @@ Inspired by Tony Stark's J.A.R.V.I.S.
 
 Features:
 - Pure Voice Input & Spoken Dialogue (Talks naturally like Google Assistant)
+- Single-Instance Enforcement (Kills stale background duplicates so voices/windows never double)
 - Zero Unsolicited Command Suggestions (No canned "say open chrome" prompts)
 - Flexible Intent Recognition (Handles conversational phrasing like "i am saying that", "how much time", "showing system status")
+- Dedicated YouTube & Media Engine (Handles "open yt", "open youtube", "play music" without duplicate windows)
 - Zero Unwanted Browser Popups (Speaks answers directly via Wikipedia & DuckDuckGo APIs)
 - Auto-Unmute & 100% Hardware Volume Boost (Fixes Windows microphone mute)
 - Dynamic Microphone Sensitivity (Auto-calibrating ambient noise)
@@ -84,8 +86,24 @@ SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # ===========================================================================
-# 0. HARDWARE MICROPHONE AUTO-UNMUTE & BOOST
+# 0. SINGLE-INSTANCE PROCESS ENFORCEMENT & MICROPHONE AUTO-UNMUTE
 # ===========================================================================
+def enforce_single_instance():
+    """Ensure only one instance of JARVIS runs at a time, killing any stale/duplicate instances."""
+    current_pid = os.getpid()
+    for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+        try:
+            if proc.info['pid'] != current_pid and proc.info['name'] and 'python' in proc.info['name'].lower():
+                cmdline = " ".join(proc.info.get('cmdline') or []).lower()
+                if 'voice_robot.py' in cmdline:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+
+
 def ensure_microphone_active_and_unmuted() -> Tuple[bool, str]:
     """
     Ensure the Windows microphone is unmuted and boosted to 100% volume.
@@ -393,6 +411,8 @@ class JarvisTaskEngine:
 
     def __init__(self, voice: JarvisVoice):
         self.voice = voice
+        self.last_action_time = 0.0
+        self.last_action_query = ""
         self.app_map = {
             "chrome": "start chrome",
             "google chrome": "start chrome",
@@ -414,6 +434,8 @@ class JarvisTaskEngine:
             "discord": "start discord",
             "edge": "start msedge",
             "paint": "mspaint",
+            "youtube": "start https://www.youtube.com",
+            "yt": "start https://www.youtube.com",
         }
 
     def _normalize(self, text: str) -> str:
@@ -434,6 +456,7 @@ class JarvisTaskEngine:
             "chrom": "chrome",
             "youtub": "youtube",
             "mic": "microphone",
+            "yt": "youtube",
         }
         words = q.split()
         words = [replacements.get(w, w) for w in words]
@@ -629,24 +652,17 @@ class JarvisTaskEngine:
             return True
 
         # -------------------------------------------------------------
-        # 6. Applications (Open / Close - ONLY on explicit command)
+        # 6. Media & YouTube (Explicit Request - BEFORE generic app open)
         # -------------------------------------------------------------
-        if any(clean_q.startswith(p) for p in ["open ", "launch ", "start ", "run "]):
-            app_name = clean_q.split(" ", 1)[1].strip()
-            self._open_application(app_name)
-            return True
+        if any(w in clean_q.split() for w in ["youtube", "yt"]) or "youtube" in clean_q or clean_q.startswith("play "):
+            now = time.time()
+            if (now - self.last_action_time < 2.5) and (clean_q == self.last_action_query):
+                return True
+            self.last_action_time = now
+            self.last_action_query = clean_q
 
-        if any(clean_q.startswith(p) for p in ["close ", "kill ", "terminate ", "stop "]):
-            app_name = clean_q.split(" ", 1)[1].strip()
-            self._close_application(app_name)
-            return True
-
-        # -------------------------------------------------------------
-        # 7. Media & YouTube (ONLY on explicit request)
-        # -------------------------------------------------------------
-        if "youtube" in clean_q or clean_q.startswith("play "):
             if "play" in clean_q:
-                search_query = clean_q.replace("play", "").replace("on youtube", "").replace("youtube", "").strip()
+                search_query = clean_q.replace("play", "").replace("on youtube", "").replace("youtube", "").replace("on yt", "").replace("yt", "").strip()
                 if search_query:
                     url = f"https://www.youtube.com/results?search_query={urllib.parse.quote_plus(search_query)}"
                     self.voice.speak(f"Playing {search_query} on YouTube now, sir.")
@@ -654,6 +670,23 @@ class JarvisTaskEngine:
                     return True
             self.voice.speak("Opening YouTube now, sir.")
             webbrowser.open("https://www.youtube.com")
+            return True
+
+        # -------------------------------------------------------------
+        # 7. Applications (Open / Close - ONLY on explicit command)
+        # -------------------------------------------------------------
+        if any(clean_q.startswith(p) for p in ["open ", "launch ", "start ", "run "]):
+            app_name = clean_q.split(" ", 1)[1].strip()
+            if app_name in ["yt", "youtube"]:
+                self.voice.speak("Opening YouTube now, sir.")
+                webbrowser.open("https://www.youtube.com")
+                return True
+            self._open_application(app_name)
+            return True
+
+        if any(clean_q.startswith(p) for p in ["close ", "kill ", "terminate ", "stop "]):
+            app_name = clean_q.split(" ", 1)[1].strip()
+            self._close_application(app_name)
             return True
 
         # -------------------------------------------------------------
@@ -738,6 +771,11 @@ class JarvisTaskEngine:
     def _open_application(self, name: str):
         """Open desktop application."""
         clean_name = name.lower().strip()
+        if clean_name in ["yt", "youtube"]:
+            self.voice.speak("Opening YouTube now, sir.")
+            webbrowser.open("https://www.youtube.com")
+            return
+
         # Match longest key first
         for key in sorted(self.app_map.keys(), key=len, reverse=True):
             if key in clean_name:
@@ -893,13 +931,16 @@ def display_hud(device_name: str, threshold: float):
         console.print("[dim cyan]Voice Engine:[/dim cyan]     [bold green]Edge-TTS (British J.A.R.V.I.S. Ryan Neural)[/bold green]")
         console.print(f"[dim cyan]Microphone:[/dim cyan]       [bold green]{device_name} (ACTIVE & UNMUTED 100%)[/bold green]")
         console.print("[dim cyan]Mode:[/dim cyan]             [bold white]Google Assistant Style (Natural Spoken Dialogue)[/bold white]")
-        console.print("[dim cyan]Status:[/dim cyan]           [bold green]Online & Ready (Speak naturally or type)[/bold green]\n")
+        console.print("[dim cyan]Status:[/dim cyan]           [bold green]Online & Ready (Single Instance Active)[/bold green]\n")
     except Exception:
         print(f"=== J.A.R.V.I.S. Voice Robot Online ({device_name}) ===")
 
 
 def main():
     """Main voice loop."""
+    # Ensure no other duplicate instances of JARVIS are running
+    enforce_single_instance()
+
     voice = JarvisVoice()
 
     # Automatically ensure Windows microphone is unmuted and boosted to 100%
