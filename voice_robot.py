@@ -3,7 +3,8 @@ J.A.R.V.I.S. — Autonomous Voice Robot Assistant
 Inspired by Tony Stark's J.A.R.V.I.S.
 
 Features:
-- Pure Voice Input & Output (Speaks and listens naturally like a robot)
+- Pure Voice Input & Output (Speaks and talks naturally like Google Assistant)
+- Zero Unwanted Browser Popups (Speaks answers directly without opening browser windows)
 - Auto-Unmute & 100% Hardware Volume Boost (Fixes Windows microphone mute)
 - Dynamic Microphone Sensitivity (Auto-calibrating ambient noise)
 - Audio Normalization (Boosts quiet laptop microphone levels for Google STT)
@@ -12,13 +13,13 @@ Features:
 - Dual Input: Voice Listening + Instant Keyboard Typing
 - Direct Task Execution:
   * Application launching and closing (Chrome, Notepad, Calc, Code, etc.)
-  * Web searches & YouTube playback
+  * Web searches & YouTube playback (only when explicitly requested)
   * System diagnostics (CPU, RAM, Battery, Disk)
   * Volume control (Up, Down, Mute)
   * Time, Date, Weather
   * Screen capture
   * Quick notes
-  * Conversational knowledge
+  * Conversational knowledge & instant answers spoken aloud
 """
 
 import sys
@@ -40,6 +41,7 @@ import msvcrt
 import os
 import platform
 import queue
+import random
 import re
 import shutil
 import subprocess
@@ -241,7 +243,6 @@ class JarvisEar:
                 all_audio = np.concatenate(chunks, axis=0)
                 rms = float(np.sqrt(np.mean(np.square(all_audio))))
                 self.ambient_rms = rms
-                # Adaptive speech trigger threshold: 1.5x ambient, minimum 0.003
                 self.speech_threshold = max(0.003, min(0.025, self.ambient_rms * 1.5))
         except Exception:
             self.speech_threshold = 0.005
@@ -367,20 +368,19 @@ class JarvisEar:
             text = self.recognizer.recognize_google(audio_data)
             return text.strip()
         except sr.UnknownValueError:
-            console.print("[dim yellow](Could not understand audio clearly, please speak closer or type)[/dim yellow]")
             return ""
         except sr.RequestError as e:
-            console.print(f"[dim red](Google Speech API offline/network error: {e})[/dim red]")
+            console.print(f"[dim red](Google Speech API network notice: {e})[/dim red]")
             return ""
         except Exception:
             return ""
 
 
 # ===========================================================================
-# 3. TASK ENGINE (DOING TASKS GIVEN BY USER)
+# 3. TASK & CONVERSATION ENGINE (TALKS & ANSWERS LIKE GOOGLE ASSISTANT)
 # ===========================================================================
 class JarvisTaskEngine:
-    """Executes desktop and system tasks requested by the user."""
+    """Answers conversationally by speaking and executes tasks only when requested."""
 
     def __init__(self, voice: JarvisVoice):
         self.voice = voice
@@ -409,8 +409,8 @@ class JarvisTaskEngine:
 
     def execute_command(self, query: str) -> bool:
         """
-        Parse and execute user command.
-        Returns False if user requested to exit, otherwise True.
+        Parse user command or conversational speech.
+        Answers by speaking. Only opens apps/browser when explicitly told to do so.
         """
         q = query.lower().strip()
 
@@ -431,18 +431,52 @@ class JarvisTaskEngine:
             return False
 
         # -------------------------------------------------------------
-        # 2. Greetings & Status
+        # 2. Natural Conversation & Dialogue (Answering Directly by Speaking)
         # -------------------------------------------------------------
+        if any(p in q for p in ["can you hear me", "hear me clearly", "are you listening", "do you hear me", "can you hear"]):
+            self.voice.speak("Loud and clear, sir. I am listening and at your service.")
+            return True
+
+        if any(p in q for p in ["not saying that", "i didn't say that", "did not say that", "not that", "that's wrong", "i didn't mean that"]):
+            self.voice.speak("My apologies, sir. Please tell me what you would like me to do.")
+            return True
+
         if q in ["hello", "hi", "hey", "are you there", "wake up"]:
-            self.voice.speak("At your service, sir. What task shall I perform?")
+            self.voice.speak("At your service, sir. What can I do for you?")
+            return True
+
+        if any(p in q for p in ["how are you", "how are things", "how's it going"]):
+            self.voice.speak("All my subroutines are fully operational, sir. How are you doing today?")
             return True
 
         if "who are you" in q or "what is your name" in q:
-            self.voice.speak("I am J.A.R.V.I.S., your autonomous voice robot assistant. Ready for your instructions, sir.")
+            self.voice.speak("I am J.A.R.V.I.S., your autonomous voice assistant. Ready for your instructions, sir.")
             return True
 
-        if "how are you" in q:
-            self.voice.speak("All my subroutines are fully functional and ready to assist you, sir.")
+        if any(p in q for p in ["what are you doing", "what's up", "what are you up to"]):
+            self.voice.speak("Monitoring systems and waiting for your command, sir.")
+            return True
+
+        if any(p in q for p in ["thank you", "thanks", "good job", "well done"]):
+            self.voice.speak("You are most welcome, sir.")
+            return True
+
+        if any(p in q for p in ["who made you", "who created you"]):
+            self.voice.speak("I was created as an autonomous J.A.R.V.I.S. voice robot assistant, inspired by Tony Stark's system, sir.")
+            return True
+
+        if any(p in q for p in ["what can you do", "help me", "commands", "features"]):
+            self.voice.speak("I can launch apps, check system diagnostics, play music on YouTube, give you the time, date, and weather, adjust volume, take notes, and answer your questions by speaking, sir.")
+            return True
+
+        if any(p in q for p in ["tell me a joke", "make me laugh"]):
+            jokes = [
+                "Why do programmers prefer dark mode? Because light attracts bugs, sir.",
+                "There are 10 types of people in the world: those who understand binary, and those who don't, sir.",
+                "Why was the computer cold? It left its Windows open, sir.",
+                "A SQL query walks into a bar, walks up to two tables and asks: Can I join you?",
+            ]
+            self.voice.speak(random.choice(jokes))
             return True
 
         # -------------------------------------------------------------
@@ -495,7 +529,7 @@ class JarvisTaskEngine:
             return True
 
         # -------------------------------------------------------------
-        # 6. Applications (Open / Close)
+        # 6. Applications (Open / Close - ONLY on explicit command)
         # -------------------------------------------------------------
         if q.startswith("open ") or q.startswith("launch ") or q.startswith("start "):
             app_name = q.replace("open ", "").replace("launch ", "").replace("start ", "").strip()
@@ -508,11 +542,11 @@ class JarvisTaskEngine:
             return True
 
         # -------------------------------------------------------------
-        # 7. Media & YouTube
+        # 7. Media & YouTube (ONLY on explicit request)
         # -------------------------------------------------------------
-        if "youtube" in q:
-            if "play" in q or "search" in q:
-                search_query = q.replace("play", "").replace("search", "").replace("on youtube", "").replace("youtube", "").strip()
+        if "youtube" in q or q.startswith("play "):
+            if "play" in q:
+                search_query = q.replace("play", "").replace("on youtube", "").replace("youtube", "").strip()
                 if search_query:
                     url = f"https://www.youtube.com/results?search_query={urllib.parse.quote_plus(search_query)}"
                     self.voice.speak(f"Playing {search_query} on YouTube now, sir.")
@@ -523,21 +557,13 @@ class JarvisTaskEngine:
             return True
 
         # -------------------------------------------------------------
-        # 8. Web Search & Information
+        # 8. Web Search (ONLY if user explicitly asks to search Google/web)
         # -------------------------------------------------------------
-        if q.startswith("google ") or q.startswith("search for ") or q.startswith("search ") or "look up" in q:
-            search_query = q.replace("google ", "").replace("search for ", "").replace("search ", "").replace("look up ", "").strip()
+        if q.startswith("search google for ") or q.startswith("google search ") or q.startswith("search on google "):
+            search_query = q.replace("search google for ", "").replace("google search ", "").replace("search on google ", "").strip()
             if search_query:
                 self.voice.speak(f"Searching Google for {search_query}, sir.")
                 webbrowser.open(f"https://www.google.com/search?q={urllib.parse.quote_plus(search_query)}")
-                self._quick_search_summary(search_query)
-                return True
-
-        if q.startswith("who is ") or q.startswith("what is ") or q.startswith("tell me about "):
-            topic = q.replace("who is ", "").replace("what is ", "").replace("tell me about ", "").strip()
-            if topic:
-                self.voice.speak(f"Accessing information for {topic}, sir.")
-                self._quick_search_summary(topic)
                 return True
 
         # -------------------------------------------------------------
@@ -593,11 +619,14 @@ class JarvisTaskEngine:
             return True
 
         # -------------------------------------------------------------
-        # 13. General Fallback Query
+        # 13. General Knowledge / Q&A (NO Browser Windows! Speaks Answer Directly)
         # -------------------------------------------------------------
-        self.voice.speak(f"Opening query for {q}, sir.")
-        webbrowser.open(f"https://www.google.com/search?q={urllib.parse.quote_plus(q)}")
-        self._quick_search_summary(q)
+        answer = self._get_background_knowledge(q)
+        if answer:
+            self.voice.speak(answer)
+        else:
+            # Polite fallback dialogue without opening anything
+            self.voice.speak("I am listening, sir. You can ask me questions, or say 'open chrome', 'play music', or 'system status'.")
         return True
 
     def _open_application(self, name: str):
@@ -673,11 +702,11 @@ class JarvisTaskEngine:
             self.voice.speak(line)
 
     def _get_weather(self, city: str):
-        """Fetch weather report."""
+        """Fetch weather report and speak out loud."""
         try:
             url = f"https://wttr.in/{urllib.parse.quote_plus(city)}?format=j1"
             req = urllib.request.Request(url, headers={"User-Agent": "curl/7.68.0"})
-            with urllib.request.urlopen(req, timeout=5) as response:
+            with urllib.request.urlopen(req, timeout=4) as response:
                 data = json.loads(response.read().decode("utf-8"))
                 current = data["current_condition"][0]
                 temp_c = current["temp_C"]
@@ -687,20 +716,40 @@ class JarvisTaskEngine:
         except Exception:
             self.voice.speak(f"Could not retrieve weather data for {city} at this time, sir.")
 
-    def _quick_search_summary(self, query: str):
-        """Fetch instant summary from DuckDuckGo."""
+    def _get_background_knowledge(self, query: str) -> Optional[str]:
+        """
+        Fetch factual knowledge in background and format for spoken response.
+        NEVER opens browser windows.
+        """
+        clean_q = query.lower()
+        for prefix in ["who is ", "what is ", "tell me about ", "where is ", "define ", "meaning of "]:
+            if clean_q.startswith(prefix):
+                clean_q = clean_q[len(prefix):].strip()
+                break
+
+        if not clean_q:
+            return None
+
         try:
-            url = f"https://api.duckduckgo.com/?q={urllib.parse.quote_plus(query)}&format=json&no_html=1&skip_disambig=1"
-            req = urllib.request.Request(url, headers={"User-Agent": "JarvisRobot/1.0"})
-            with urllib.request.urlopen(req, timeout=4) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-                abstract = data.get("AbstractText", "")
-                if abstract:
-                    sentences = abstract.split(". ")
-                    summary = ". ".join(sentences[:2]) + "."
-                    self.voice.speak(summary)
+            search_url = f"https://en.wikipedia.org/w/api.php?action=opensearch&search={urllib.parse.quote(clean_q)}&limit=1&format=json"
+            req = urllib.request.Request(search_url, headers={"User-Agent": "JarvisRobot/1.0"})
+            with urllib.request.urlopen(req, timeout=3) as r:
+                data = json.loads(r.read().decode("utf-8"))
+                if data and len(data) > 1 and data[1]:
+                    title = data[1][0]
+                    summary_url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{urllib.parse.quote(title)}"
+                    req2 = urllib.request.Request(summary_url, headers={"User-Agent": "JarvisRobot/1.0"})
+                    with urllib.request.urlopen(req2, timeout=3) as r2:
+                        d = json.loads(r2.read().decode("utf-8"))
+                        extract = d.get("extract", "")
+                        if extract:
+                            sentences = [s.strip() for s in extract.split(". ") if s.strip()]
+                            # Speak the first 2 concise sentences
+                            return ". ".join(sentences[:2]) + "."
         except Exception:
             pass
+
+        return None
 
 
 # ===========================================================================
@@ -723,15 +772,16 @@ def display_hud(device_name: str, threshold: float):
         console.print(Panel(Text(banner, justify="center", style="bold cyan"), box=ROUNDED, style="cyan"))
         console.print("[dim cyan]Voice Engine:[/dim cyan]     [bold green]Edge-TTS (British J.A.R.V.I.S. Ryan Neural)[/bold green]")
         console.print(f"[dim cyan]Microphone:[/dim cyan]       [bold green]{device_name} (ACTIVE & UNMUTED 100%)[/bold green]")
-        console.print("[dim cyan]Input Controls:[/dim cyan]   [bold white]Speak into mic OR type command below[/bold white]")
+        console.print("[dim cyan]Mode:[/dim cyan]             [bold white]Google Assistant Style (Speaks answers aloud, no popups)[/bold white]")
         console.print("[dim cyan]Voice Commands:[/dim cyan]")
-        console.print("  * [italic yellow]'open chrome'[/italic yellow], [italic yellow]'open notepad'[/italic yellow], [italic yellow]'open calculator'[/italic yellow], [italic yellow]'open code'[/italic yellow]")
-        console.print("  * [italic yellow]'system status'[/italic yellow] or [italic yellow]'diagnostics'[/italic yellow] (CPU, RAM, Battery)")
+        console.print("  * [italic yellow]'can you hear me'[/italic yellow], [italic yellow]'how are you'[/italic yellow], [italic yellow]'tell me a joke'[/italic yellow] (Talks to you)")
+        console.print("  * [italic yellow]'who is Albert Einstein'[/italic yellow], [italic yellow]'what is quantum computing'[/italic yellow] (Answers by speaking)")
+        console.print("  * [italic yellow]'system status'[/italic yellow] or [italic yellow]'diagnostics'[/italic yellow] (Speaks CPU, RAM, Battery)")
         console.print("  * [italic yellow]'what time is it'[/italic yellow], [italic yellow]'what is today's date'[/italic yellow], [italic yellow]'weather in Delhi'[/italic yellow]")
-        console.print("  * [italic yellow]'play interstellar theme on youtube'[/italic yellow], [italic yellow]'search google for quantum computing'[/italic yellow]")
+        console.print("  * [italic yellow]'open chrome'[/italic yellow], [italic yellow]'open notepad'[/italic yellow], [italic yellow]'open calculator'[/italic yellow], [italic yellow]'open code'[/italic yellow]")
+        console.print("  * [italic yellow]'play interstellar theme on youtube'[/italic yellow]")
         console.print("  * [italic yellow]'volume up'[/italic yellow], [italic yellow]'volume down'[/italic yellow], [italic yellow]'mute'[/italic yellow]")
-        console.print("  * [italic yellow]'take a screenshot'[/italic yellow]")
-        console.print("  * [italic yellow]'take a note buy groceries'[/italic yellow], [italic yellow]'read my notes'[/italic yellow]")
+        console.print("  * [italic yellow]'take a screenshot'[/italic yellow], [italic yellow]'take a note buy groceries'[/italic yellow], [italic yellow]'read my notes'[/italic yellow]")
         console.print("  * [italic yellow]'exit'[/italic yellow] or [italic yellow]'goodbye'[/italic yellow] to power down\n")
     except Exception:
         print(f"=== J.A.R.V.I.S. Voice Robot Online ({device_name}) ===")
