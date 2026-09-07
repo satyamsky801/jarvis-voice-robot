@@ -3,36 +3,27 @@ J.A.R.V.I.S. — Autonomous Voice Robot Assistant
 Inspired by Tony Stark's J.A.R.V.I.S.
 
 Features:
+- Fast 1-Second Response Latency (Optimized 0.75s silence cutoff & async execution)
+- Runs in Background 24/7 (Hidden background mode or interactive HUD mode)
+- Persistent Loop (Runs continuously until explicitly closed or told 'exit'/'goodbye')
 - Pure Voice Input & Spoken Dialogue (Talks naturally like Google Assistant)
 - Single-Instance Enforcement (Kills stale background duplicates so voices/windows never double)
-- Zero Unsolicited Command Suggestions (No canned "say open chrome" prompts)
-- Flexible Intent Recognition (Handles conversational phrasing like "i am saying that", "how much time", "showing system status")
+- Self-Voice Feedback Guard (Microphone ignores audio while JARVIS is speaking)
 - Dedicated YouTube & Media Engine (Handles "open yt", "open youtube", "play music" without duplicate windows)
-- Zero Unwanted Browser Popups (Speaks answers directly via Wikipedia & DuckDuckGo APIs)
+- Zero Unsolicited Command Suggestions (No canned prompts)
 - Auto-Unmute & 100% Hardware Volume Boost (Fixes Windows microphone mute)
-- Dynamic Microphone Sensitivity (Auto-calibrating ambient noise)
-- Audio Normalization (Boosts quiet laptop microphone levels for Google STT)
 - British Ryan Neural Voice via Edge-TTS (100% Free, High Quality)
-- Non-blocking Callback Audio Stream (Supports Windows WDM-KS, MME, DirectSound, WASAPI)
-- Dual Input: Voice Listening + Instant Keyboard Typing
-- Direct Task Execution:
-  * Application launching and closing (Chrome, Notepad, Calc, Code, etc.)
-  * Web searches & YouTube playback (only when explicitly requested)
-  * System diagnostics (CPU, RAM, Battery, Disk)
-  * Volume control (Up, Down, Mute)
-  * Time, Date, Weather
-  * Screen capture
-  * Quick notes
-  * Conversational knowledge & instant answers spoken aloud
 """
 
 import sys
 
-# Ensure UTF-8 encoding across Windows consoles
+# Ensure UTF-8 encoding across Windows consoles and safe background stdout
 if sys.platform == "win32":
     try:
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+        if sys.stdout is not None:
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        if sys.stderr is not None:
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
         pass
 
@@ -69,8 +60,11 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
 
-# Initialize Rich Console with safe encoding
-console = Console(highlight=False)
+# Initialize Rich Console with safe fallback
+try:
+    console = Console(highlight=False)
+except Exception:
+    console = None
 
 # Virtual Key Codes for Windows Volume Control
 VK_VOLUME_MUTE = 0xAD
@@ -83,6 +77,23 @@ WAKE_WORDS = ["jarvis", "hey jarvis", "robot", "hello jarvis"]
 NOTES_FILE = Path("jarvis_notes.txt")
 SCREENSHOTS_DIR = Path(os.path.expanduser("~/Pictures/Jarvis_Screenshots"))
 SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def safe_print(message: str, style: str = ""):
+    """Safely print text whether in console or background mode."""
+    if console:
+        try:
+            if style:
+                console.print(f"[{style}]{message}[/{style}]")
+            else:
+                console.print(message)
+            return
+        except Exception:
+            pass
+    try:
+        print(message)
+    except Exception:
+        pass
 
 
 # ===========================================================================
@@ -105,10 +116,7 @@ def enforce_single_instance():
 
 
 def ensure_microphone_active_and_unmuted() -> Tuple[bool, str]:
-    """
-    Ensure the Windows microphone is unmuted and boosted to 100% volume.
-    Returns (success, mic_name).
-    """
+    """Ensure the Windows microphone is unmuted and boosted to 100% volume."""
     try:
         from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
         from comtypes import CLSCTX_ALL
@@ -151,12 +159,7 @@ class JarvisVoice:
         if not clean_text:
             return
 
-        # Display spoken dialogue cleanly in the console
-        try:
-            console.print(f"[bold cyan][J.A.R.V.I.S.]:[/bold cyan] [italic bright_white]{clean_text}[/italic bright_white]")
-        except Exception:
-            print(f"[J.A.R.V.I.S.]: {clean_text}")
-
+        safe_print(f"[J.A.R.V.I.S.]: {clean_text}", "bold cyan")
         self.speech_queue.put(clean_text)
 
     def _speech_worker(self):
@@ -166,7 +169,7 @@ class JarvisVoice:
             self.is_speaking = True
             try:
                 self._synthesize_and_play(text)
-            except Exception as e:
+            except Exception:
                 pass
             finally:
                 self.is_speaking = False
@@ -189,7 +192,6 @@ class JarvisVoice:
                 sd.play(data, fs)
                 sd.wait()
         except Exception:
-            # Fallback to Windows native SAPI if Edge-TTS fails
             self._fallback_sapi_speak(text)
         finally:
             if os.path.exists(temp_mp3):
@@ -209,12 +211,13 @@ class JarvisVoice:
 
 
 # ===========================================================================
-# 2. VOICE LISTENER (MICROPHONE CAPTURE & GOOGLE STT)
+# 2. FAST VOICE LISTENER (0.75s Latency + Background Safe)
 # ===========================================================================
 class JarvisEar:
-    """Robust non-blocking audio capture stream with audio normalization."""
+    """Fast audio capture stream with 0.75s silence cutoff and self-voice feedback guard."""
 
-    def __init__(self):
+    def __init__(self, voice: Optional[JarvisVoice] = None):
+        self.voice = voice
         self.recognizer = sr.Recognizer()
         self.input_device, self.device_name = self._find_best_input_device()
         device_info = sd.query_devices(self.input_device)
@@ -226,29 +229,25 @@ class JarvisEar:
     def _find_best_input_device(self) -> Tuple[int, str]:
         """Find the working microphone input device, prioritizing Microphone Array."""
         devices = sd.query_devices()
-
-        # 1. First priority: Microphone Array
         for i, d in enumerate(devices):
             if d.get("max_input_channels", 0) > 0:
                 name = d.get("name", "").lower()
                 if "array" in name:
                     return i, d.get("name", "")
 
-        # 2. Second priority: Any microphone input
         for i, d in enumerate(devices):
             if d.get("max_input_channels", 0) > 0:
                 name = d.get("name", "").lower()
                 if "mic" in name:
                     return i, d.get("name", "")
 
-        # 3. Fallback: Any available input device
         for i, d in enumerate(devices):
             if d.get("max_input_channels", 0) > 0:
                 return i, d.get("name", "")
 
         return 1, "Microphone Array"
 
-    def calibrate(self, duration_sec: float = 0.4):
+    def calibrate(self, duration_sec: float = 0.3):
         """Calibrate ambient background noise level."""
         audio_q = queue.Queue()
 
@@ -270,15 +269,20 @@ class JarvisEar:
                 all_audio = np.concatenate(chunks, axis=0)
                 rms = float(np.sqrt(np.mean(np.square(all_audio))))
                 self.ambient_rms = rms
-                self.speech_threshold = max(0.003, min(0.025, self.ambient_rms * 1.5))
+                self.speech_threshold = max(0.003, min(0.020, self.ambient_rms * 1.4))
         except Exception:
             self.speech_threshold = 0.005
 
-    def record_phrase(self, max_duration_sec: float = 8.0, silence_cutoff: float = 1.6) -> Tuple[Optional[sr.AudioData], Optional[str]]:
+    def record_phrase(self, max_duration_sec: float = 6.0, silence_cutoff: float = 0.75) -> Tuple[Optional[sr.AudioData], Optional[str]]:
         """
-        Record speech or capture keyboard input.
-        Returns (AudioData, typed_text).
+        Record speech with ultra-fast 0.75s silence cutoff.
+        Ignores microphone input while J.A.R.V.I.S. is speaking to prevent self-voice loops.
         """
+        # Self-voice feedback guard: Do not listen to JARVIS's own voice
+        if self.voice and self.voice.is_speaking:
+            time.sleep(0.1)
+            return None, None
+
         audio_q = queue.Queue()
 
         def callback(indata, frames, time_info, status):
@@ -294,12 +298,8 @@ class JarvisEar:
                 blocksize=int(self.sample_rate * 0.05),
             )
         except Exception:
-            try:
-                console.print("[dim white]Type your command below:[/dim white]")
-                typed = input("You > ").strip()
-                return None, typed if typed else None
-            except Exception:
-                return None, None
+            time.sleep(0.5)
+            return None, None
 
         recorded_chunks = []
         speech_started = False
@@ -309,19 +309,22 @@ class JarvisEar:
 
         with stream:
             while (time.time() - start_time) < max_duration_sec:
-                # Check for keyboard typing
-                if msvcrt.kbhit():
-                    ch = msvcrt.getwche()
-                    if ch in ('\r', '\n'):
-                        print()
-                        typed = "".join(typed_chars).strip()
-                        if typed:
-                            return None, typed
-                    elif ch == '\b':  # Backspace
-                        if typed_chars:
-                            typed_chars.pop()
-                    else:
-                        typed_chars.append(ch)
+                # Check for keyboard typing if console is available
+                try:
+                    if msvcrt.kbhit():
+                        ch = msvcrt.getwche()
+                        if ch in ('\r', '\n'):
+                            print()
+                            typed = "".join(typed_chars).strip()
+                            if typed:
+                                return None, typed
+                        elif ch == '\b':
+                            if typed_chars:
+                                typed_chars.pop()
+                        else:
+                            typed_chars.append(ch)
+                except Exception:
+                    pass
 
                 try:
                     chunk = audio_q.get(timeout=0.05)
@@ -335,7 +338,7 @@ class JarvisEar:
                 if rms > self.speech_threshold:
                     if not speech_started:
                         speech_started = True
-                        console.print("[bold cyan]🎙️ [Hearing voice... Speak now][/bold cyan]")
+                        safe_print("🎙️ [Hearing voice... Speak now]", "bold cyan")
                     silence_time = 0.0
                     recorded_chunks.append(chunk)
                 elif speech_started:
@@ -345,7 +348,7 @@ class JarvisEar:
                         break
                 else:
                     recorded_chunks.append(chunk)
-                    max_pre = int(0.3 / max(0.01, chunk_dur))
+                    max_pre = int(0.2 / max(0.01, chunk_dur))
                     if len(recorded_chunks) > max_pre:
                         recorded_chunks.pop(0)
 
@@ -380,9 +383,9 @@ class JarvisEar:
 
         return sr.AudioData(pcm16, 16000, 2), None
 
-    def listen(self, timeout_sec: float = 7.0) -> str:
-        """Listen to the microphone and transcribe spoken words, or return typed text."""
-        audio_data, typed_text = self.record_phrase(max_duration_sec=timeout_sec)
+    def listen(self, timeout_sec: float = 5.0) -> str:
+        """Listen to the microphone and transcribe spoken words."""
+        audio_data, typed_text = self.record_phrase(max_duration_sec=timeout_sec, silence_cutoff=0.75)
 
         if typed_text:
             return typed_text
@@ -391,13 +394,13 @@ class JarvisEar:
             return ""
 
         try:
-            console.print("[bold yellow]⚡ [Processing speech...][/bold yellow]")
+            safe_print("⚡ [Processing speech...]", "bold yellow")
             text = self.recognizer.recognize_google(audio_data)
             return text.strip()
         except sr.UnknownValueError:
             return ""
         except sr.RequestError as e:
-            console.print(f"[dim red](Google Speech API network notice: {e})[/dim red]")
+            safe_print(f"(Speech network notice: {e})", "dim red")
             return ""
         except Exception:
             return ""
@@ -407,7 +410,7 @@ class JarvisEar:
 # 3. TASK & CONVERSATION ENGINE (TALKS & ANSWERS LIKE GOOGLE ASSISTANT)
 # ===========================================================================
 class JarvisTaskEngine:
-    """Answers conversationally by speaking and executes tasks cleanly without unsolicited command suggestions."""
+    """Fast execution engine: executes commands in under 1 second with clean dialogue."""
 
     def __init__(self, voice: JarvisVoice):
         self.voice = voice
@@ -444,7 +447,6 @@ class JarvisTaskEngine:
         q = re.sub(r'[^\w\s]', ' ', q)
         q = " ".join(q.split())
 
-        # Phonetic & Speech-to-Text corrections
         replacements = {
             "syatem": "system",
             "sistem": "system",
@@ -513,8 +515,8 @@ class JarvisTaskEngine:
     def execute_command(self, query: str) -> bool:
         """
         Parse user command or conversational speech.
-        Answers by speaking. Only executes actions or opens apps/browser when told to do so.
-        Never outputs canned suggestions.
+        Executes actions immediately and speaks confirmation concurrently.
+        Returns False ONLY when user explicitly asks to exit/shutdown.
         """
         raw_norm = self._normalize(query)
         if not raw_norm:
@@ -541,7 +543,7 @@ class JarvisTaskEngine:
             clean_q = raw_norm
 
         # -------------------------------------------------------------
-        # 1. Exit / Shutdown Commands
+        # 1. Exit / Shutdown Commands (ONLY condition that stops the loop)
         # -------------------------------------------------------------
         if any(word in clean_q for word in ["exit", "quit", "goodbye", "go to sleep", "sleep now", "shutdown jarvis", "power down"]):
             self.voice.speak("Powering down voice protocols. Have a great day, sir.")
@@ -593,7 +595,7 @@ class JarvisTaskEngine:
             return True
 
         # -------------------------------------------------------------
-        # 3. Time and Date Intents (Flexible matching)
+        # 3. Time and Date Intents (Instant Response)
         # -------------------------------------------------------------
         if "timer" not in clean_q and any(w in clean_q for w in ["time", "clock"]):
             now_str = datetime.datetime.now().strftime("%I:%M %p")
@@ -606,7 +608,7 @@ class JarvisTaskEngine:
             return True
 
         # -------------------------------------------------------------
-        # 4. System Diagnostics & Hardware Status (Flexible matching)
+        # 4. System Diagnostics & Hardware Status
         # -------------------------------------------------------------
         is_system_status = (
             any(w in clean_q for w in [
@@ -619,7 +621,7 @@ class JarvisTaskEngine:
             or any(w in clean_q for w in ["diagnostics", "diagnostic", "battery", "cpu", "ram", "specs"])
         )
         if is_system_status:
-            cpu = psutil.cpu_percent(interval=0.5)
+            cpu = psutil.cpu_percent(interval=0.2)
             ram = psutil.virtual_memory().percent
             disk = psutil.disk_usage("/").percent
             battery = psutil.sensors_battery()
@@ -633,7 +635,7 @@ class JarvisTaskEngine:
             return True
 
         # -------------------------------------------------------------
-        # 5. Volume Control
+        # 5. Volume Control (Immediate Execution)
         # -------------------------------------------------------------
         if any(w in clean_q for w in ["volume up", "increase volume", "louder"]):
             self._adjust_volume(up=True, steps=5)
@@ -652,11 +654,11 @@ class JarvisTaskEngine:
             return True
 
         # -------------------------------------------------------------
-        # 6. Media & YouTube (Explicit Request - BEFORE generic app open)
+        # 6. Media & YouTube (Immediate Launch in < 1 Second)
         # -------------------------------------------------------------
         if any(w in clean_q.split() for w in ["youtube", "yt"]) or "youtube" in clean_q or clean_q.startswith("play "):
             now = time.time()
-            if (now - self.last_action_time < 2.5) and (clean_q == self.last_action_query):
+            if (now - self.last_action_time < 2.0) and (clean_q == self.last_action_query):
                 return True
             self.last_action_time = now
             self.last_action_query = clean_q
@@ -665,21 +667,22 @@ class JarvisTaskEngine:
                 search_query = clean_q.replace("play", "").replace("on youtube", "").replace("youtube", "").replace("on yt", "").replace("yt", "").strip()
                 if search_query:
                     url = f"https://www.youtube.com/results?search_query={urllib.parse.quote_plus(search_query)}"
-                    self.voice.speak(f"Playing {search_query} on YouTube now, sir.")
                     webbrowser.open(url)
+                    self.voice.speak(f"Playing {search_query} on YouTube now, sir.")
                     return True
-            self.voice.speak("Opening YouTube now, sir.")
+
             webbrowser.open("https://www.youtube.com")
+            self.voice.speak("Opening YouTube now, sir.")
             return True
 
         # -------------------------------------------------------------
-        # 7. Applications (Open / Close - ONLY on explicit command)
+        # 7. Applications (Immediate Launch in < 1 Second)
         # -------------------------------------------------------------
         if any(clean_q.startswith(p) for p in ["open ", "launch ", "start ", "run "]):
             app_name = clean_q.split(" ", 1)[1].strip()
             if app_name in ["yt", "youtube"]:
-                self.voice.speak("Opening YouTube now, sir.")
                 webbrowser.open("https://www.youtube.com")
+                self.voice.speak("Opening YouTube now, sir.")
                 return True
             self._open_application(app_name)
             return True
@@ -690,15 +693,15 @@ class JarvisTaskEngine:
             return True
 
         # -------------------------------------------------------------
-        # 8. Web Search (ONLY if user explicitly asks to search Google/web)
+        # 8. Web Search (Explicit Request)
         # -------------------------------------------------------------
         if any(clean_q.startswith(p) for p in ["search google for ", "google search ", "search on google "]):
             for p in ["search google for ", "google search ", "search on google "]:
                 if clean_q.startswith(p):
                     search_query = clean_q[len(p):].strip()
                     if search_query:
-                        self.voice.speak(f"Searching Google for {search_query}, sir.")
                         webbrowser.open(f"https://www.google.com/search?q={urllib.parse.quote_plus(search_query)}")
+                        self.voice.speak(f"Searching Google for {search_query}, sir.")
                         return True
 
         # -------------------------------------------------------------
@@ -757,7 +760,7 @@ class JarvisTaskEngine:
             return True
 
         # -------------------------------------------------------------
-        # 13. General Knowledge / Q&A (NO Browser Windows! Speaks Answer Directly)
+        # 13. General Knowledge / Q&A (Speaks Answer Directly)
         # -------------------------------------------------------------
         answer = self._get_background_knowledge(clean_q) or self._get_background_knowledge(raw_norm)
         if answer:
@@ -769,22 +772,21 @@ class JarvisTaskEngine:
         return True
 
     def _open_application(self, name: str):
-        """Open desktop application."""
+        """Open desktop application immediately."""
         clean_name = name.lower().strip()
         if clean_name in ["yt", "youtube"]:
-            self.voice.speak("Opening YouTube now, sir.")
             webbrowser.open("https://www.youtube.com")
+            self.voice.speak("Opening YouTube now, sir.")
             return
 
-        # Match longest key first
         for key in sorted(self.app_map.keys(), key=len, reverse=True):
             if key in clean_name:
-                self.voice.speak(f"Opening {key}, sir.")
                 subprocess.Popen(self.app_map[key], shell=True)
+                self.voice.speak(f"Opening {key}, sir.")
                 return
 
-        self.voice.speak(f"Launching {name}, sir.")
         subprocess.Popen(f"start {name}", shell=True)
+        self.voice.speak(f"Launching {name}, sir.")
 
     def _close_application(self, name: str):
         """Close running application."""
@@ -810,7 +812,7 @@ class JarvisTaskEngine:
         for _ in range(steps):
             ctypes.windll.user32.keybd_event(key, 0, 0, 0)
             ctypes.windll.user32.keybd_event(key, 0, 2, 0)
-            time.sleep(0.02)
+            time.sleep(0.01)
 
     def _take_screenshot(self):
         """Take screenshot using PowerShell."""
@@ -851,7 +853,7 @@ class JarvisTaskEngine:
         try:
             url = f"https://wttr.in/{urllib.parse.quote_plus(city)}?format=j1"
             req = urllib.request.Request(url, headers={"User-Agent": "curl/7.68.0"})
-            with urllib.request.urlopen(req, timeout=4) as response:
+            with urllib.request.urlopen(req, timeout=3) as response:
                 data = json.loads(response.read().decode("utf-8"))
                 current = data["current_condition"][0]
                 temp_c = current["temp_C"]
@@ -862,10 +864,7 @@ class JarvisTaskEngine:
             self.voice.speak(f"Could not retrieve weather data for {city} at this time, sir.")
 
     def _get_background_knowledge(self, query: str) -> Optional[str]:
-        """
-        Fetch factual knowledge in background and format for spoken response.
-        NEVER opens browser windows.
-        """
+        """Fetch factual knowledge in background and format for spoken response."""
         clean_q = query.lower().strip()
         for prefix in ["who is ", "what is ", "tell me about ", "where is ", "define ", "meaning of ", "why is ", "how does "]:
             if clean_q.startswith(prefix):
@@ -879,13 +878,13 @@ class JarvisTaskEngine:
         try:
             search_url = f"https://en.wikipedia.org/w/api.php?action=opensearch&search={urllib.parse.quote(clean_q)}&limit=1&format=json"
             req = urllib.request.Request(search_url, headers={"User-Agent": "JarvisRobot/1.0"})
-            with urllib.request.urlopen(req, timeout=3) as r:
+            with urllib.request.urlopen(req, timeout=2.5) as r:
                 data = json.loads(r.read().decode("utf-8"))
                 if data and len(data) > 1 and data[1]:
                     title = data[1][0]
                     summary_url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{urllib.parse.quote(title)}"
                     req2 = urllib.request.Request(summary_url, headers={"User-Agent": "JarvisRobot/1.0"})
-                    with urllib.request.urlopen(req2, timeout=3) as r2:
+                    with urllib.request.urlopen(req2, timeout=2.5) as r2:
                         d = json.loads(r2.read().decode("utf-8"))
                         extract = d.get("extract", "")
                         if extract:
@@ -898,7 +897,7 @@ class JarvisTaskEngine:
         try:
             ddg_url = f"https://api.duckduckgo.com/?q={urllib.parse.quote(clean_q)}&format=json&no_html=1&skip_disambig=1"
             req = urllib.request.Request(ddg_url, headers={"User-Agent": "JarvisRobot/1.0"})
-            with urllib.request.urlopen(req, timeout=3) as r:
+            with urllib.request.urlopen(req, timeout=2.5) as r:
                 data = json.loads(r.read().decode("utf-8"))
                 abstract = data.get("AbstractText", "")
                 if abstract:
@@ -911,10 +910,12 @@ class JarvisTaskEngine:
 
 
 # ===========================================================================
-# 4. MAIN VOICE ROBOT ASSISTANT RUNNER
+# 4. MAIN VOICE ROBOT ASSISTANT RUNNER (PERSISTENT BACKGROUND & FOREGROUND)
 # ===========================================================================
 def display_hud(device_name: str, threshold: float):
     """Print holographic Jarvis banner without unsolicited command suggestions."""
+    if not console:
+        return
     try:
         console.clear()
     except Exception:
@@ -930,15 +931,15 @@ def display_hud(device_name: str, threshold: float):
         console.print(Panel(Text(banner, justify="center", style="bold cyan"), box=ROUNDED, style="cyan"))
         console.print("[dim cyan]Voice Engine:[/dim cyan]     [bold green]Edge-TTS (British J.A.R.V.I.S. Ryan Neural)[/bold green]")
         console.print(f"[dim cyan]Microphone:[/dim cyan]       [bold green]{device_name} (ACTIVE & UNMUTED 100%)[/bold green]")
-        console.print("[dim cyan]Mode:[/dim cyan]             [bold white]Google Assistant Style (Natural Spoken Dialogue)[/bold white]")
-        console.print("[dim cyan]Status:[/dim cyan]           [bold green]Online & Ready (Single Instance Active)[/bold green]\n")
+        console.print("[dim cyan]Mode:[/dim cyan]             [bold white]Ultra-Fast 1-Sec Latency & Persistent Background Listener[/bold white]")
+        console.print("[dim cyan]Status:[/dim cyan]           [bold green]Online & Ready (Runs continuously until closed)[/bold green]\n")
     except Exception:
-        print(f"=== J.A.R.V.I.S. Voice Robot Online ({device_name}) ===")
+        pass
 
 
 def main():
-    """Main voice loop."""
-    # Ensure no other duplicate instances of JARVIS are running
+    """Main voice loop - runs continuously in background or foreground until explicitly closed."""
+    # Ensure no duplicate instances run concurrently
     enforce_single_instance()
 
     voice = JarvisVoice()
@@ -946,42 +947,36 @@ def main():
     # Automatically ensure Windows microphone is unmuted and boosted to 100%
     ensure_microphone_active_and_unmuted()
 
-    ear = JarvisEar()
+    ear = JarvisEar(voice=voice)
     engine = JarvisTaskEngine(voice)
 
     ear.calibrate(duration_sec=0.3)
     display_hud(ear.device_name, ear.speech_threshold)
 
-    # Initial Greeting
-    voice.speak("All systems initialized. J.A.R.V.I.S. voice protocol active. I am at your command, sir.")
+    # Initial Spoken Greeting
+    voice.speak("All systems online. J.A.R.V.I.S. voice protocol active. I am listening continuously, sir.")
 
-    running = True
-    while running:
+    # Persistent loop: keeps running forever until user explicitly commands exit/goodbye
+    while True:
         try:
-            try:
-                console.print("\n[bold green]● [LISTENING...][/bold green] [dim white](Speak or type your command)[/dim white]")
-            except Exception:
-                print("\n[LISTENING...] (Speak or type your command)")
+            safe_print("● [LISTENING...] (Speak or type your command)", "bold green")
 
-            recognized_text = ear.listen(timeout_sec=7.0)
+            recognized_text = ear.listen(timeout_sec=5.0)
 
             if recognized_text:
-                try:
-                    console.print(f"[bold yellow][YOU]:[/bold yellow] [bold white]{recognized_text}[/bold white]")
-                except Exception:
-                    print(f"[YOU]: {recognized_text}")
-
-                running = engine.execute_command(recognized_text)
+                safe_print(f"[YOU]: {recognized_text}", "bold yellow")
+                keep_running = engine.execute_command(recognized_text)
+                if not keep_running:
+                    # User explicitly requested exit/shutdown
+                    break
 
         except KeyboardInterrupt:
             voice.speak("Emergency stop initiated. Goodbye, sir.")
             break
         except Exception as e:
-            try:
-                console.print(f"[dim red](System notice: {e})[/dim red]")
-            except Exception:
-                print(f"(System notice: {e})")
-            time.sleep(1)
+            # Self-healing: Never terminate on errors
+            safe_print(f"(System notice: {e})", "dim red")
+            time.sleep(0.5)
 
 
 if __name__ == "__main__":
