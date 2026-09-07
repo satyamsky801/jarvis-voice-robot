@@ -4,7 +4,8 @@ Inspired by Tony Stark's J.A.R.V.I.S.
 
 Features:
 - Pure Voice Input & Output (Speaks and listens naturally like a robot)
-- British Ryan / Guy Neural Voice via Edge-TTS (100% Free, High Quality)
+- British Ryan Neural Voice via Edge-TTS (100% Free, High Quality)
+- Non-blocking Callback Audio Stream (Supports Windows WDM-KS, MME, DirectSound, WASAPI)
 - Direct Task Execution:
   * Application launching and closing (Chrome, Notepad, Calc, Code, etc.)
   * Web searches & YouTube playback
@@ -14,7 +15,6 @@ Features:
   * Screen capture
   * Quick notes
   * Conversational knowledge
-- Interactive Voice Loop
 """
 
 import sys
@@ -34,6 +34,7 @@ import json
 import logging
 import os
 import platform
+import queue
 import re
 import shutil
 import subprocess
@@ -143,85 +144,101 @@ class JarvisVoice:
 # 2. AUDIO INPUT & RECOGNITION (J.A.R.V.I.S. EAR)
 # ===========================================================================
 class JarvisEar:
-    """Handles audio capture and speech recognition."""
+    """Handles audio capture using asynchronous callbacks and speech recognition."""
 
     def __init__(self):
         self.recognizer = sr.Recognizer()
-        self.recognizer.energy_threshold = 300
-        self.recognizer.dynamic_energy_threshold = True
-        self.input_device = self._find_best_input_device()
+        self.input_device, self.device_name = self._find_best_input_device()
+        device_info = sd.query_devices(self.input_device)
+        self.sample_rate = int(device_info.get("default_samplerate", 44100))
+        self.channels = min(2, max(1, device_info.get("max_input_channels", 1)))
+        self.speech_threshold = 0.008  # Default sensitive threshold
 
-    def _find_best_input_device(self) -> int:
-        """Find working microphone input device."""
+    def _find_best_input_device(self) -> Tuple[int, str]:
+        """Find the working microphone input device, prioritizing Microphone Array."""
         devices = sd.query_devices()
 
-        # Prioritize microphone array / mic
+        # 1. First priority: Microphone Array (built-in laptop mic array)
         for i, d in enumerate(devices):
             if d.get("max_input_channels", 0) > 0:
                 name = d.get("name", "").lower()
-                if "mic" in name or "array" in name:
-                    try:
-                        sd.check_input_settings(device=i)
-                        return i
-                    except Exception:
-                        pass
+                if "array" in name:
+                    return i, d.get("name", "")
 
-        # Fallback to any working input device
+        # 2. Second priority: Any microphone input
         for i, d in enumerate(devices):
             if d.get("max_input_channels", 0) > 0:
-                try:
-                    sd.check_input_settings(device=i)
-                    return i
-                except Exception:
-                    pass
+                name = d.get("name", "").lower()
+                if "mic" in name:
+                    return i, d.get("name", "")
 
-        return 11  # Default fallback
+        # 3. Fallback: Any available input device
+        for i, d in enumerate(devices):
+            if d.get("max_input_channels", 0) > 0:
+                return i, d.get("name", "")
 
-    def record_phrase(self, max_duration_sec: float = 6.0, silence_cutoff: float = 1.2) -> Optional[sr.AudioData]:
-        """Record an audio phrase from microphone using sounddevice."""
-        device_info = sd.query_devices(self.input_device)
-        sample_rate = int(device_info.get("default_samplerate", 44100))
-        channels = min(2, device_info.get("max_input_channels", 1))
+        return 11, "Default Realtek Microphone"
 
-        chunk_sec = 0.1
-        chunk_samples = int(chunk_sec * sample_rate)
-        total_chunks = int(max_duration_sec / chunk_sec)
+    def record_phrase(self, max_duration_sec: float = 6.0, silence_cutoff: float = 1.4) -> Optional[sr.AudioData]:
+        """
+        Record speech using non-blocking asynchronous audio callback queue.
+        Works seamlessly across Windows WDM-KS, MME, DirectSound, and WASAPI without blocking errors.
+        """
+        audio_q = queue.Queue()
+
+        def callback(indata, frames, time_info, status):
+            audio_q.put(indata.copy())
+
+        try:
+            stream = sd.InputStream(
+                device=self.input_device,
+                channels=self.channels,
+                samplerate=self.sample_rate,
+                dtype="float32",
+                callback=callback,
+                blocksize=int(self.sample_rate * 0.05),  # 50ms chunks
+            )
+        except Exception as e:
+            console.print(f"[dim red](Audio device open error: {e})[/dim red]")
+            return None
 
         recorded_chunks = []
         speech_started = False
-        silence_count = 0
-        max_silence_chunks = int(silence_cutoff / chunk_sec)
+        silence_time = 0.0
+        start_time = time.time()
 
-        try:
-            with sd.InputStream(device=self.input_device, channels=channels, samplerate=sample_rate, dtype="float32") as stream:
-                for _ in range(total_chunks):
-                    chunk, _ = stream.read(chunk_samples)
-                    rms = np.sqrt(np.mean(np.square(chunk)))
+        with stream:
+            while (time.time() - start_time) < max_duration_sec:
+                try:
+                    chunk = audio_q.get(timeout=0.1)
+                except queue.Empty:
+                    continue
 
-                    # Speech detection threshold
-                    if rms > 0.015:
-                        speech_started = True
-                        silence_count = 0
-                        recorded_chunks.append(chunk)
-                    elif speech_started:
-                        silence_count += 1
-                        recorded_chunks.append(chunk)
-                        if silence_count > max_silence_chunks:
-                            break
-                    else:
-                        # Rolling buffer for pre-speech capture
-                        recorded_chunks.append(chunk)
-                        if len(recorded_chunks) > 4:
-                            recorded_chunks.pop(0)
+                chunk_dur = len(chunk) / self.sample_rate
+                rms = np.sqrt(np.mean(np.square(chunk)))
 
-        except Exception as e:
-            console.print(f"[dim red](Audio record notice: {e})[/dim red]")
-            return None
+                # Detect speech activity
+                if rms > self.speech_threshold:
+                    speech_started = True
+                    silence_time = 0.0
+                    recorded_chunks.append(chunk)
+                elif speech_started:
+                    silence_time += chunk_dur
+                    recorded_chunks.append(chunk)
+                    # Stop if user paused speaking
+                    if silence_time >= silence_cutoff:
+                        break
+                else:
+                    # Pre-speech rolling buffer (keep 0.3s)
+                    recorded_chunks.append(chunk)
+                    max_pre = int(0.3 / max(0.01, chunk_dur))
+                    if len(recorded_chunks) > max_pre:
+                        recorded_chunks.pop(0)
 
         if not speech_started or not recorded_chunks:
             return None
 
-        # Concatenate audio
+        # Concatenate audio chunks
         full_audio = np.concatenate(recorded_chunks, axis=0)
 
         # Convert to mono
@@ -231,7 +248,7 @@ class JarvisEar:
             full_audio = full_audio[:, 0]
 
         # Resample to 16,000 Hz for Google Speech Recognition
-        target_samples = int(len(full_audio) * 16000 / sample_rate)
+        target_samples = int(len(full_audio) * 16000 / self.sample_rate)
         resampled = scipy.signal.resample(full_audio, target_samples)
 
         # Convert to 16-bit PCM bytes
@@ -251,7 +268,7 @@ class JarvisEar:
         except sr.UnknownValueError:
             return ""
         except sr.RequestError as e:
-            console.print(f"[dim red](Speech recognition network error: {e})[/dim red]")
+            console.print(f"[dim red](Speech API network error: {e})[/dim red]")
             return ""
         except Exception:
             return ""
@@ -587,7 +604,7 @@ class JarvisTaskEngine:
 # ===========================================================================
 # 4. MAIN VOICE ROBOT ASSISTANT RUNNER
 # ===========================================================================
-def display_hud():
+def display_hud(device_name: str):
     """Print holographic Jarvis banner."""
     try:
         console.clear()
@@ -603,8 +620,8 @@ def display_hud():
     try:
         console.print(Panel(Text(banner, justify="center", style="bold cyan"), box=ROUNDED, style="cyan"))
         console.print("[dim cyan]Voice Engine:[/dim cyan] [bold green]Edge-TTS (British J.A.R.V.I.S. Ryan Neural)[/bold green]")
-        console.print("[dim cyan]Speech Recognition:[/dim cyan] [bold green]Google STT + Realtek Microphone Array[/bold green]")
-        console.print("[dim cyan]Status:[/dim cyan] [bold white]Active Voice Protocol Online[/bold white]")
+        console.print(f"[dim cyan]Microphone:[/dim cyan]   [bold green]{device_name}[/bold green]")
+        console.print("[dim cyan]Status:[/dim cyan]       [bold white]Voice Loop Active[/bold white]")
         console.print("[dim cyan]Voice Commands:[/dim cyan]")
         console.print("  * [italic yellow]'open chrome'[/italic yellow], [italic yellow]'open notepad'[/italic yellow], [italic yellow]'open calculator'[/italic yellow], [italic yellow]'open code'[/italic yellow]")
         console.print("  * [italic yellow]'system status'[/italic yellow] or [italic yellow]'diagnostics'[/italic yellow] (CPU, RAM, Battery)")
@@ -615,16 +632,16 @@ def display_hud():
         console.print("  * [italic yellow]'take a note buy groceries'[/italic yellow], [italic yellow]'read my notes'[/italic yellow]")
         console.print("  * [italic yellow]'exit'[/italic yellow] or [italic yellow]'goodbye'[/italic yellow] to power down\n")
     except Exception:
-        print("=== J.A.R.V.I.S. Voice Robot Online ===")
+        print(f"=== J.A.R.V.I.S. Voice Robot Online ({device_name}) ===")
 
 
 def main():
     """Main voice loop."""
-    display_hud()
-
     voice = JarvisVoice()
     ear = JarvisEar()
     engine = JarvisTaskEngine(voice)
+
+    display_hud(ear.device_name)
 
     # Initial Greeting
     voice.speak("All systems initialized. J.A.R.V.I.S. voice protocol active. I am at your command, sir.")
