@@ -64,6 +64,7 @@ from rich.panel import Panel
 from rich.text import Text
 
 from llm_engine import JarvisLLMEngine
+from desktop_character import JarvisDesktopMascot
 
 # Initialize Rich Console with safe fallback
 try:
@@ -394,8 +395,9 @@ def ensure_microphone_active_and_unmuted() -> Tuple[bool, str]:
 class JarvisVoice:
     """High-fidelity neural voice using Edge-TTS with async playback queue."""
 
-    def __init__(self, voice_name: str = VOICE_NAME):
+    def __init__(self, voice_name: str = VOICE_NAME, mascot=None):
         self.voice_name = voice_name
+        self.mascot = mascot
         self.speech_queue = queue.Queue()
         self.is_speaking = False
         self._worker_thread = threading.Thread(target=self._speech_worker, daemon=True)
@@ -416,12 +418,16 @@ class JarvisVoice:
         while True:
             text = self.speech_queue.get()
             self.is_speaking = True
+            if self.mascot:
+                self.mascot.set_state("speak", text=text, title="JARVIS", duration=len(text) * 0.08 + 2.0)
             try:
                 self._synthesize_and_play(text)
             except Exception:
                 pass
             finally:
                 self.is_speaking = False
+                if self.mascot and getattr(self.mascot, "state", "") == "speak":
+                    self.mascot.set_state("idle")
                 self.speech_queue.task_done()
 
     def _synthesize_and_play(self, text: str):
@@ -465,8 +471,9 @@ class JarvisVoice:
 class JarvisEar:
     """Fast audio capture stream with 0.75s silence cutoff and self-voice feedback guard."""
 
-    def __init__(self, voice: Optional[JarvisVoice] = None):
+    def __init__(self, voice: Optional[JarvisVoice] = None, mascot=None):
         self.voice = voice
+        self.mascot = mascot
         self.recognizer = sr.Recognizer()
         self.input_device, self.device_name = self._find_best_input_device()
         device_info = sd.query_devices(self.input_device)
@@ -621,10 +628,17 @@ class JarvisEar:
 
     def listen(self, timeout_sec: float = 5.0) -> str:
         """Listen to the microphone and transcribe spoken words."""
+        if self.mascot:
+            self.mascot.set_state("listen", text="Listening...", title="MIC ACTIVE", duration=timeout_sec)
+
         audio_data, typed_text = self.record_phrase(max_duration_sec=timeout_sec, silence_cutoff=0.75)
         if typed_text:
+            if self.mascot:
+                self.mascot.set_state("think", text=f'"{typed_text}"', title="TYPED", duration=3.0)
             return typed_text
         if not audio_data:
+            if self.mascot and getattr(self.mascot, "state", "") == "listen":
+                self.mascot.set_state("idle")
             return ""
 
         try:
@@ -633,13 +647,24 @@ class JarvisEar:
             clean = text.strip()
             if clean:
                 log_session_event("HEARD", clean)
+                if self.mascot:
+                    self.mascot.set_state("think", text=f'"{clean}"', title="HEARD", duration=3.0)
+            else:
+                if self.mascot and getattr(self.mascot, "state", "") == "listen":
+                    self.mascot.set_state("idle")
             return clean
         except sr.UnknownValueError:
+            if self.mascot and getattr(self.mascot, "state", "") == "listen":
+                self.mascot.set_state("idle")
             return ""
         except sr.RequestError as e:
             safe_print(f"(Speech network notice: {e})", "dim red")
+            if self.mascot and getattr(self.mascot, "state", "") == "listen":
+                self.mascot.set_state("idle")
             return ""
         except Exception:
+            if self.mascot and getattr(self.mascot, "state", "") == "listen":
+                self.mascot.set_state("idle")
             return ""
 
 
@@ -649,8 +674,9 @@ class JarvisEar:
 class JarvisTaskEngine:
     """Full-featured execution engine supporting tabs, YouTube playback, maps, and system control."""
 
-    def __init__(self, voice: JarvisVoice):
+    def __init__(self, voice: JarvisVoice, mascot=None):
         self.voice = voice
+        self.mascot = mascot
         self.last_action_time = 0.0
         self.last_action_query = ""
         self.stopwatch_start = None
@@ -1368,35 +1394,51 @@ class JarvisTaskEngine:
 
                 if act in ["search_youtube", "play_youtube"]:
                     query = param if param else "trending music"
+                    if self.mascot:
+                        self.mascot.set_state("action", text=f"YouTube: {query} 🎵", title="ACTION", duration=3.0)
                     nav_url = f"https://www.youtube.com/results?search_query={urllib.parse.quote_plus(query)}"
                     navigate_browser_url(nav_url)
                     self.voice.speak(res.speech or f"Searching {query} on YouTube.")
                     return True
                 elif act == "open_app":
                     if param:
+                        if self.mascot:
+                            self.mascot.set_state("action", text=f"Opening {param} 🚀", title="ACTION", duration=2.5)
                         self._open_application(param)
                     return True
                 elif act == "close_app":
                     if param:
+                        if self.mascot:
+                            self.mascot.set_state("action", text=f"Closed {param} 🛑", title="ACTION", duration=2.5)
                         self._close_application(param)
                     return True
                 elif act == "screenshot":
+                    if self.mascot:
+                        self.mascot.set_state("action", text="Screenshot Saved 📸", title="ACTION", duration=2.5)
                     self._take_screenshot()
                     return True
                 elif act == "volume_up":
+                    if self.mascot:
+                        self.mascot.set_state("action", text="Volume Up 🔊", title="ACTION", duration=2.0)
                     self._adjust_volume(up=True, steps=5)
                     self.voice.speak("Turned the volume up.")
                     return True
                 elif act == "volume_down":
+                    if self.mascot:
+                        self.mascot.set_state("action", text="Volume Down 🔉", title="ACTION", duration=2.0)
                     self._adjust_volume(up=False, steps=5)
                     self.voice.speak("Turned the volume down.")
                     return True
                 elif act == "mute":
+                    if self.mascot:
+                        self.mascot.set_state("action", text="Muted 🔇", title="ACTION", duration=2.0)
                     user32.keybd_event(VK_VOLUME_MUTE, 0, 0, 0)
                     user32.keybd_event(VK_VOLUME_MUTE, 0, 2, 0)
                     self.voice.speak("Muted.")
                     return True
                 elif act in ["pause_media", "resume_media"]:
+                    if self.mascot:
+                        self.mascot.set_state("action", text="Playback Toggled ⏯️", title="ACTION", duration=2.0)
                     send_youtube_hotkey(VK_K)
                     self.voice.speak("Paused." if act == "pause_media" else "Resumed.")
                     return True
@@ -1642,40 +1684,88 @@ def display_hud(device_name: str, threshold: float, llm_info: str = "Ollama (lla
         pass
 
 
-def main():
-    """Main voice loop - runs continuously in background or foreground until explicitly closed."""
-    enforce_single_instance()
-
-    voice = JarvisVoice()
-    ensure_microphone_active_and_unmuted()
-
-    ear = JarvisEar(voice=voice)
-    engine = JarvisTaskEngine(voice)
-
-    ear.calibrate(duration_sec=0.3)
-    llm_info = f"{engine.llm_engine.provider.capitalize()} ({engine.llm_engine.model})" if engine.llm_engine else "Local Fast Path"
-    display_hud(ear.device_name, ear.speech_threshold, llm_info)
-
-    voice.speak("Hey, I'm online and listening. What do you need?")
-
+def run_voice_loop(ear: JarvisEar, engine: JarvisTaskEngine, voice: JarvisVoice, mascot=None):
+    """Background loop for voice recognition & command execution."""
     while True:
         try:
             safe_print("● [LISTENING...] (Speak or type your command)", "bold green")
-
             recognized_text = ear.listen(timeout_sec=5.0)
 
             if recognized_text:
                 safe_print(f"[YOU]: {recognized_text}", "bold yellow")
                 keep_running = engine.execute_command(recognized_text)
                 if not keep_running:
+                    if mascot:
+                        mascot.close()
                     break
 
         except KeyboardInterrupt:
             voice.speak("Catch you later. Shutting down.")
+            if mascot:
+                mascot.close()
             break
         except Exception as e:
             safe_print(f"(System notice: {e})", "dim red")
             time.sleep(0.5)
+
+
+def main():
+    """Launch JARVIS with interactive desktop mascot character and voice intelligence."""
+    enforce_single_instance()
+
+    cli_mode = "--cli" in sys.argv or "--no-gui" in sys.argv
+
+    # 1. Initialize Desktop Mascot UI on main thread if not in CLI mode
+    mascot = None
+    if not cli_mode:
+        try:
+            mascot = JarvisDesktopMascot()
+        except Exception as e:
+            logger.warning("Could not launch Desktop Mascot GUI, falling back to CLI mode: %s", e)
+            mascot = None
+
+    # 2. Initialize Voice, Ear, and TaskEngine with mascot hooks
+    voice = JarvisVoice(mascot=mascot)
+    ensure_microphone_active_and_unmuted()
+
+    ear = JarvisEar(voice=voice, mascot=mascot)
+    engine = JarvisTaskEngine(voice=voice, mascot=mascot)
+
+    # Wire up mascot click & typed command callbacks
+    if mascot:
+        def on_typed(text: str):
+            engine.execute_command(text)
+
+        mascot.on_typed_command = on_typed
+
+    ear.calibrate(duration_sec=0.3)
+    llm_info = f"{engine.llm_engine.provider.capitalize()} ({engine.llm_engine.model})" if engine.llm_engine else "Local Fast Path"
+    display_hud(ear.device_name, ear.speech_threshold, llm_info)
+
+    # 3. Start background voice thread
+    voice_thread = threading.Thread(
+        target=run_voice_loop,
+        args=(ear, engine, voice, mascot),
+        daemon=True
+    )
+    voice_thread.start()
+
+    voice.speak("Hey, I'm online and listening. What do you need?")
+
+    # 4. If GUI mode, run Tkinter event loop on main thread; else wait for voice thread
+    if mascot:
+        try:
+            mascot.run()
+        except KeyboardInterrupt:
+            pass
+        finally:
+            mascot.close()
+    else:
+        try:
+            while voice_thread.is_alive():
+                time.sleep(0.5)
+        except KeyboardInterrupt:
+            voice.speak("Catch you later. Shutting down.")
 
 
 if __name__ == "__main__":

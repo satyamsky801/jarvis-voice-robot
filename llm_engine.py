@@ -50,8 +50,9 @@ Supported actions:
 - "previous_track": parameter is null
 - "open_website": parameter is full URL or domain (e.g. "https://github.com")
 
-If the user is having a conversation, asking a question, asking for advice, or brainstorming (NO physical computer action):
-Set "action" to null and "action_param" to null, and put your direct, helpful answer in "speech". Keep "speech" to 1-3 natural spoken sentences.
+If the user is having a conversation, asking a question, asking for recommendations or advice, or brainstorming:
+CRITICAL: Set "action" to null and "action_param" to null! Only use actions when the user explicitly commands you to control their computer or open apps.
+Put your direct, helpful answer in "speech". Keep "speech" to 1-3 natural spoken sentences.
 Always return valid JSON only.
 """
 
@@ -233,7 +234,7 @@ class JarvisLLMEngine:
             )
 
         # Parse JSON or structured response
-        result = self._parse_llm_response(raw_text)
+        result = self._parse_llm_response(raw_text, user_query=clean_query)
 
         # Update history with user query and assistant speech
         self.history.append({"role": "user", "content": clean_query})
@@ -325,7 +326,7 @@ class JarvisLLMEngine:
             data = json.loads(resp.read().decode("utf-8"))
             return data["candidates"][0]["content"]["parts"][0]["text"]
 
-    def _parse_llm_response(self, raw_text: str) -> LLMResult:
+    def _parse_llm_response(self, raw_text: str, user_query: str = "") -> LLMResult:
         """Extract action, action_param, and speech text from LLM response."""
         raw_clean = raw_text.strip()
         speech = ""
@@ -356,7 +357,30 @@ class JarvisLLMEngine:
                     action_param = act_match.group(2).strip()
                 speech = re.sub(r'\[ACTION:[^\]]+\]', '', raw_clean, flags=re.IGNORECASE).strip()
 
-        # 3. If speech is still empty, use cleaned raw text
+        # 3. Validate that extracted action matches user query intent (prevent false positives)
+        if action and user_query:
+            q_lower = user_query.lower()
+            valid = False
+            if action in ["search_youtube", "play_youtube"]:
+                valid = any(w in q_lower for w in ["youtube", "yt", "video", "song", "music", "play", "watch", "listen", "track", "search"])
+            elif action == "open_app":
+                valid = any(w in q_lower for w in ["open", "launch", "start", "run", "bring up", "app", "application"])
+            elif action == "close_app":
+                valid = any(w in q_lower for w in ["close", "kill", "terminate", "exit", "shut down", "stop"])
+            elif action == "screenshot":
+                valid = any(w in q_lower for w in ["screenshot", "screen", "picture of", "capture", "snapshot"])
+            elif action in ["volume_up", "volume_down", "mute"]:
+                valid = any(w in q_lower for w in ["volume", "sound", "audio", "mute", "unmute", "louder", "quieter"])
+            elif action in ["pause_media", "resume_media", "next_track", "previous_track"]:
+                valid = any(w in q_lower for w in ["pause", "resume", "stop", "next", "previous", "skip", "play"])
+            elif action == "open_website":
+                valid = any(w in q_lower for w in ["open", "browse", "go to", "website", "site", "page", "http", ".com", ".org", ".io"])
+
+            if not valid:
+                action = None
+                action_param = None
+
+        # 4. If speech is still empty, use cleaned raw text
         if not speech:
             speech = raw_clean
 
